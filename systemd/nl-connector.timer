@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NiceLabel connector run every minute
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=60
+Unit=nl-connector.service
+
+[Install]
+WantedBy=timers.target

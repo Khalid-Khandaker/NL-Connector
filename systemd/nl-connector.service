@@ -1,0 +1,13 @@
+[Unit]
+Description=NiceLabel File Drop Connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nlconnector
+ExecStart=/opt/nl-connector/app/.venv/bin/python /opt/nl-connector/app/connector.py
+
+# Logs are handled by JSON log file, but journal still capture failures.
+StandardOutput=journal
+StandardError=journal
