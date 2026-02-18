@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ====== Settings (customer IT supplies these) ======
-# Windows LAN IP (Wi-Fi/Ethernet), NOT VirtualBox host-only IP
 WINDOWS_IP="${WINDOWS_IP:-}"
 SHARE_NAME="${SHARE_NAME:-NiceLabelIn}"
 
-# Where to mount the Windows watch folder
 MOUNT_POINT="/mnt/nicelabel/in"
 
-# Install locations
 BASE="/opt/nl-connector"
 APP_DIR="$BASE/app"
 CFG_DIR="$BASE/config"
@@ -17,11 +13,14 @@ LOG_DIR="/var/log/nl-connector"
 
 VENV="$APP_DIR/.venv"
 
-SERVICE_NAME="nl-connector"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
+CONNECTOR_NAME="nl-connector"
+CONNECTOR_SERVICE="/etc/systemd/system/${CONNECTOR_NAME}.service"
+CONNECTOR_TIMER="/etc/systemd/system/${CONNECTOR_NAME}.timer"
 
-# ====== Helpers ======
+SELECTOR_NAME="nl-selector"
+SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
+SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 need_root() {
@@ -32,11 +31,14 @@ need_root() {
 
 check_required_files() {
   [ -f "./app/connector.py" ] || die "Missing ./app/connector.py"
+  [ -f "./app/selector.py" ] || die "Missing ./app/selector.py"
   [ -f "./app/cleanup_retention.sh" ] || die "Missing ./app/cleanup_retention.sh"
   [ -f "./config/config.env" ] || die "Missing ./config/config.env (copy from template)"
   [ -f "./config/smb-credentials" ] || die "Missing ./config/smb-credentials (copy from template)"
   [ -f "./systemd/nl-connector.service" ] || die "Missing ./systemd/nl-connector.service"
   [ -f "./systemd/nl-connector.timer" ] || die "Missing ./systemd/nl-connector.timer"
+  [ -f "./systemd/nl-selector.service" ] || die "Missing ./systemd/nl-selector.service"
+  [ -f "./systemd/nl-selector.timer" ] || die "Missing ./systemd/nl-selector.timer"
 }
 
 create_user_if_needed() {
@@ -51,7 +53,7 @@ create_user_if_needed() {
 install_deps() {
   echo "Installing OS dependencies..."
   apt-get update -y
-  apt-get install -y python3 python3-venv python3-pip cifs-utils
+  apt-get install -y python3 python3-venv python3-pip cifs-utils unixodbc
 }
 
 create_dirs() {
@@ -66,8 +68,13 @@ create_dirs() {
 install_app_files() {
   echo "Installing app files..."
   install -m 755 ./app/connector.py "$APP_DIR/connector.py"
+  install -m 755 ./app/selector.py "$APP_DIR/selector.py"
   install -m 755 ./app/cleanup_retention.sh "$APP_DIR/cleanup_retention.sh"
-  chown nlconnector:nlconnector "$APP_DIR/connector.py" "$APP_DIR/cleanup_retention.sh"
+  if [ -f "./app/requirements.txt" ]; then
+    install -m 644 ./app/requirements.txt "$APP_DIR/requirements.txt"
+  fi
+  chown nlconnector:nlconnector "$APP_DIR/connector.py" "$APP_DIR/selector.py" "$APP_DIR/cleanup_retention.sh" || true
+  [ -f "$APP_DIR/requirements.txt" ] && chown nlconnector:nlconnector "$APP_DIR/requirements.txt" || true
 }
 
 install_config_files() {
@@ -85,7 +92,12 @@ setup_venv() {
 
   echo "Installing Python deps..."
   sudo -u nlconnector "$VENV/bin/pip" install --upgrade pip
-  sudo -u nlconnector "$VENV/bin/pip" install supabase python-dotenv
+
+  if [ -f "$APP_DIR/requirements.txt" ]; then
+    sudo -u nlconnector "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
+  else
+    sudo -u nlconnector "$VENV/bin/pip" install supabase python-dotenv pyodbc
+  fi
 }
 
 setup_mount() {
@@ -94,12 +106,10 @@ setup_mount() {
   echo "Setting up SMB mount..."
   mkdir -p "$MOUNT_POINT"
 
-  # UID/GID mapping so nlconnector can write
   local UID GID
   UID="$(id -u nlconnector)"
   GID="$(id -g nlconnector)"
 
-  # Create fstab entry if not present
   local FSTAB_LINE="//${WINDOWS_IP}/${SHARE_NAME}  ${MOUNT_POINT}  cifs  credentials=${CFG_DIR}/smb-credentials,uid=${UID},gid=${GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix  0  0"
 
   if grep -q "${MOUNT_POINT}  cifs" /etc/fstab; then
@@ -111,22 +121,28 @@ setup_mount() {
 
   systemctl daemon-reload || true
 
-  # Remount
   umount -f "$MOUNT_POINT" 2>/dev/null || true
   mount -a
 
-  # Write test as nlconnector
+  command -v mountpoint >/dev/null 2>&1 || true
+  if command -v mountpoint >/dev/null 2>&1; then
+    mountpoint -q "$MOUNT_POINT" || die "Mount failed for $MOUNT_POINT (check share + creds)."
+  fi
+
   echo "Testing write access to SMB mount..."
   sudo -u nlconnector touch "${MOUNT_POINT}/_nlconnector_write_test.txt" || die "nlconnector cannot write to ${MOUNT_POINT}. Check Windows share + NTFS permissions."
 }
 
 install_systemd_units() {
   echo "Installing systemd unit files..."
-  install -m 644 ./systemd/nl-connector.service "$SERVICE_FILE"
-  install -m 644 ./systemd/nl-connector.timer "$TIMER_FILE"
+  install -m 644 ./systemd/nl-connector.service "$CONNECTOR_SERVICE"
+  install -m 644 ./systemd/nl-connector.timer "$CONNECTOR_TIMER"
+  install -m 644 ./systemd/nl-selector.service "$SELECTOR_SERVICE"
+  install -m 644 ./systemd/nl-selector.timer "$SELECTOR_TIMER"
 
   systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}.timer"
+  systemctl enable --now "${CONNECTOR_NAME}.timer"
+  systemctl enable --now "${SELECTOR_NAME}.timer"
 }
 
 setup_retention_cron() {
@@ -140,8 +156,11 @@ CRON
 
 final_checks() {
   echo "Final checks..."
-  systemctl status "${SERVICE_NAME}.timer" --no-pager || true
-  systemctl list-timers --no-pager | grep "${SERVICE_NAME}" || true
+  systemctl status "${CONNECTOR_NAME}.timer" --no-pager || true
+  systemctl status "${SELECTOR_NAME}.timer" --no-pager || true
+
+  echo "Running selector once manually (as nlconnector)..."
+  sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/selector.py" || true
 
   echo "Running connector once manually (as nlconnector)..."
   sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/connector.py" || true
@@ -167,3 +186,4 @@ main() {
 }
 
 main
+
