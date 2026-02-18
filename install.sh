@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -euo pipefail
 
 WINDOWS_IP="${WINDOWS_IP:-}"
@@ -16,6 +17,7 @@ CONNECTOR_NAME="nl-connector"
 CONNECTOR_SERVICE="/etc/systemd/system/${CONNECTOR_NAME}.service"
 CONNECTOR_TIMER="/etc/systemd/system/${CONNECTOR_NAME}.timer"
 
+# keep your naming as-is
 SELECTOR_NAME="selector"
 SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
 SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
@@ -40,6 +42,31 @@ check_required_files() {
   [ -f "./systemd/selector.timer" ] || die "Missing ./systemd/selector.timer"
 }
 
+preflight_checks() {
+  echo "Running preflight checks..."
+
+  # basic tools
+  command -v systemctl >/dev/null 2>&1 || die "systemd not available (systemctl missing)"
+  command -v python3 >/dev/null 2>&1 || die "python3 not installed"
+
+  # required inputs
+  [ -n "$WINDOWS_IP" ] || die "WINDOWS_IP not set. Example: sudo WINDOWS_IP=192.168.254.103 ./install.sh"
+  [ -n "$SHARE_NAME" ] || die "SHARE_NAME empty (default is NiceLabelIn)"
+
+  # check we can write to system locations before doing anything
+  mkdir -p /opt/.nlconnector_preflight_test 2>/dev/null || die "Cannot write to /opt"
+  rmdir /opt/.nlconnector_preflight_test 2>/dev/null || true
+
+  mkdir -p /var/log/.nlconnector_preflight_test 2>/dev/null || die "Cannot write to /var/log"
+  rmdir /var/log/.nlconnector_preflight_test 2>/dev/null || true
+
+  # check config file readability
+  [ -r "./config/config.env" ] || die "config/config.env not readable"
+  [ -r "./config/smb-credentials" ] || die "config/smb-credentials not readable"
+
+  echo "Preflight checks passed."
+}
+
 create_user_if_needed() {
   if id nlconnector >/dev/null 2>&1; then
     echo "OK: user nlconnector exists"
@@ -52,7 +79,25 @@ create_user_if_needed() {
 install_deps() {
   echo "Installing OS dependencies..."
   apt-get update -y
-  apt-get install -y python3 python3-venv python3-pip cifs-utils unixodbc
+  apt-get install -y python3 python3-venv python3-pip cifs-utils unixodbc curl ca-certificates gnupg lsb-release
+
+  # --- Microsoft ODBC Driver 18 (auto install) ---
+  # Works for Ubuntu 20.04/22.04/24.04 by using VERSION_ID from /etc/os-release.
+  echo "Installing Microsoft ODBC Driver 18 for SQL Server..."
+  . /etc/os-release
+  UBUNTU_VER="${VERSION_ID}"
+
+  curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+
+  cat > /etc/apt/sources.list.d/mssql-release.list <<EOF
+deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/${UBUNTU_VER}/prod ${VERSION_CODENAME} main
+EOF
+
+  apt-get update -y
+  ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
+  # optional: sqlcmd tools (comment out if you don't want it)
+  # ACCEPT_EULA=Y apt-get install -y mssql-tools18
 }
 
 create_dirs() {
@@ -100,8 +145,6 @@ setup_venv() {
 }
 
 setup_mount() {
-  [ -n "$WINDOWS_IP" ] || die "Set WINDOWS_IP first. Example: sudo WINDOWS_IP=192.168.254.103 ./install.sh"
-
   echo "Setting up SMB mount..."
   mkdir -p "$MOUNT_POINT"
 
@@ -123,7 +166,6 @@ setup_mount() {
   umount -f "$MOUNT_POINT" 2>/dev/null || true
   mount -a
 
-  command -v mountpoint >/dev/null 2>&1 || true
   if command -v mountpoint >/dev/null 2>&1; then
     mountpoint -q "$MOUNT_POINT" || die "Mount failed for $MOUNT_POINT (check share + creds)."
   fi
@@ -172,6 +214,7 @@ final_checks() {
 main() {
   need_root
   check_required_files
+  preflight_checks
   install_deps
   create_user_if_needed
   create_dirs
