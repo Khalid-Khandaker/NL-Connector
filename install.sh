@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
 WINDOWS_IP="${WINDOWS_IP:-}"
@@ -17,7 +16,7 @@ CONNECTOR_NAME="nl-connector"
 CONNECTOR_SERVICE="/etc/systemd/system/${CONNECTOR_NAME}.service"
 CONNECTOR_TIMER="/etc/systemd/system/${CONNECTOR_NAME}.timer"
 
-SELECTOR_NAME="nl-selector"
+SELECTOR_NAME="selector"
 SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
 SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
 
@@ -37,8 +36,8 @@ check_required_files() {
   [ -f "./config/smb-credentials" ] || die "Missing ./config/smb-credentials (copy from template)"
   [ -f "./systemd/nl-connector.service" ] || die "Missing ./systemd/nl-connector.service"
   [ -f "./systemd/nl-connector.timer" ] || die "Missing ./systemd/nl-connector.timer"
-  [ -f "./systemd/nl-selector.service" ] || die "Missing ./systemd/nl-selector.service"
-  [ -f "./systemd/nl-selector.timer" ] || die "Missing ./systemd/nl-selector.timer"
+  [ -f "./systemd/selector.service" ] || die "Missing ./systemd/selector.service"
+  [ -f "./systemd/selector.timer" ] || die "Missing ./systemd/selector.timer"
 }
 
 create_user_if_needed() {
@@ -137,8 +136,8 @@ install_systemd_units() {
   echo "Installing systemd unit files..."
   install -m 644 ./systemd/nl-connector.service "$CONNECTOR_SERVICE"
   install -m 644 ./systemd/nl-connector.timer "$CONNECTOR_TIMER"
-  install -m 644 ./systemd/nl-selector.service "$SELECTOR_SERVICE"
-  install -m 644 ./systemd/nl-selector.timer "$SELECTOR_TIMER"
+  install -m 644 ./systemd/selector.service "$SELECTOR_SERVICE"
+  install -m 644 ./systemd/selector.timer "$SELECTOR_TIMER"
 
   systemctl daemon-reload
   systemctl enable --now "${CONNECTOR_NAME}.timer"
@@ -186,4 +185,3 @@ main() {
 }
 
 main
-
