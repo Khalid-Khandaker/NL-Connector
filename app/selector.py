@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 from supabase import create_client
 
 import time
-import traceback  # (kept as-is; not required but harmless)
+import traceback
 
 ENV_PATH = "/opt/nl-connector/config/.env"
 
@@ -18,7 +18,6 @@ API1_FILE_NAME = "selector.py"
 
 
 def utc_iso() -> str:
-    # ISO UTC with milliseconds + Z
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
 
@@ -50,18 +49,13 @@ def log_event(
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
-        # Never crash selector due to logging failure
         pass
 
 
 def detect_trigger() -> str:
-    # systemd sets INVOCATION_ID for services; manual runs usually won't have it
     return "systemd" if os.getenv("INVOCATION_ID") else "manual"
 
 
-# -----------------------------
-# TEXT NORMALIZATION
-# -----------------------------
 def clean_product_name(name: str) -> str:
     """
     Remove bracketed and parenthesized suffixes.
@@ -79,9 +73,6 @@ def clean_product_name(name: str) -> str:
     return name
 
 
-# -----------------------------
-# SQL HELPERS
-# -----------------------------
 def fetch_top10(conn) -> list[dict]:
     cur = conn.cursor()
     cur.execute("SET NOCOUNT ON;")
@@ -118,9 +109,6 @@ def fetch_recipe_details(conn, code_liste: int, code_trans: int, code_nutrient_s
     return json.loads(raw)
 
 
-# -----------------------------
-# DATA EXTRACTION HELPERS
-# -----------------------------
 def pick(item: dict, *keys, default=None):
     """Return first non-None value among keys."""
     for k in keys:
@@ -167,8 +155,6 @@ def extract_site(details: dict) -> str:
     return "" if site is None else str(site)
 
 
-# ✅ Better batch date parsing:
-#   StartDate -> CreatedAt/created_at -> today
 def parse_batch_date_from_top10(item: dict) -> str:
     v = pick(item, "StartDate", "start_date", "startDate", default=None)
     if v is None:
@@ -198,9 +184,6 @@ def parse_batch_date_from_top10(item: dict) -> str:
         return datetime.now().strftime("%Y%m%d")
 
 
-# ✅ Site code rule you requested:
-# - If numeric: keep as-is (1 -> "1")
-# - If text: take first 3 uppercase letters/numbers
 def site_code_from_site(site: str) -> str:
     s = (site or "").strip().upper()
 
@@ -208,7 +191,6 @@ def site_code_from_site(site: str) -> str:
         return "XXX"
 
     if s.isdigit():
-        # keep numeric as-is (no zero padding)
         try:
             return str(int(s))
         except Exception:
@@ -220,10 +202,6 @@ def site_code_from_site(site: str) -> str:
     return s.ljust(3, "X")
 
 
-# -----------------------------
-# SUPABASE HELPERS
-# -----------------------------
-# ✅ next seq based on prefix like: "YYYYMMDD-0010-DOM-"
 def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
     like_pattern = f"{prefix}%"
     resp = sb.table(table).select("batch_id").like("batch_id", like_pattern).limit(2000).execute()
@@ -241,9 +219,6 @@ def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
     return max_seq + 1
 
 
-# -----------------------------
-# MAIN
-# -----------------------------
 def main():
     env = dotenv_values(ENV_PATH)
 
@@ -256,7 +231,6 @@ def main():
     )
 
     try:
-        # -------- SQL SERVER --------
         server = env.get("SQL_SERVER", "192.168.1.28,1510")
         db = env.get("SQL_DATABASE", "CMC_2025")
         user = env.get("SQL_USER", "egs.khalid")
@@ -272,7 +246,6 @@ def main():
             "Encrypt=yes;TrustServerCertificate=yes;"
         )
 
-        # -------- SUPABASE --------
         sb_url = env.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
         sb_key = env.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         sb_table = env.get("SUPABASE_TABLE") or os.getenv("SUPABASE_TABLE") or "nl_print_queue"
@@ -282,13 +255,10 @@ def main():
 
         sb = create_client(sb_url, sb_key)
 
-        # -------- Defaults --------
         status_to_set = env.get("STATUS_TO_SET", "READY")
         qty_default = int(env.get("QTY_DEFAULT", "1"))
         language_override = (env.get("LANGUAGE_DEFAULT", "") or "").strip()
 
-        # ✅ Optional override: force site code from name (DOM, etc.)
-        # If empty, site code uses numeric site.
         site_name_for_code = (env.get("SITE_NAME_FOR_CODE", "") or "").strip()
 
         inserted = 0
@@ -422,10 +392,8 @@ def main():
             batches = len(groups)
 
             for (batch_date, site), rows in groups.items():
-                # ✅ NEW batch_id format: YYYYMMDD-ROWCOUNT4-SITECODE-SEQ3
                 row_count_4 = f"{len(rows):04d}"
 
-                # ✅ site code source: SITE_NAME_FOR_CODE (DOM) else numeric site
                 site_code_source = site_name_for_code if site_name_for_code else site
                 site_code = site_code_from_site(site_code_source)
 

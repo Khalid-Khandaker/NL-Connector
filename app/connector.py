@@ -1,499 +1,247 @@
-import os
-import re
-import json
-from datetime import datetime, date
-from typing import Any, Dict, List, Tuple
-
-import pyodbc
-from dotenv import dotenv_values
+import csv, json, os, shutil, sys, time
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 from supabase import create_client
 
-import time
-import traceback  # (kept as-is; not required but harmless)
+BASE = "/opt/nl-connector"
+STAGING = f"{BASE}/staging"
+ARCHIVE = f"{BASE}/archive"
+ERROR = f"{BASE}/error"
+LOG_PATH = "/var/log/nl-connector/connector.log"
+DEST = "/mnt/nicelabel/in"
 
-ENV_PATH = "/opt/nl-connector/config/.env"
+RETRIES = 3
+RETRY_DELAY_SEC = 10
 
-LOG_PATH_DEFAULT = "/var/log/nl-connector/connector.log"
-API1_FILE_NAME = "selector.py"
+REQUIRED = [
+  ("batch_id", 40, "text"),
+  ("site", 60, "text"),
+  ("template_name", 80, "text"),
+  ("language", 10, "text"),
+  ("product_name", 120, "text"),
+  ("allergens_short", 80, "text"),
+  ("qty", None, "int_1_999"),
+]
 
-
-def utc_iso() -> str:
-    # ISO UTC with milliseconds + Z
-    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
-
-
-def log_event(
-    *,
-    level: str,
-    event: str,
-    message: str,
-    batch_id: str = "",
-    file_name: str = API1_FILE_NAME,
-    log_path: str = LOG_PATH_DEFAULT,
-) -> None:
-    """
-    Append one JSON log line to connector.log
-    Required fields per spec:
-      timestamp, level, event, batch_id, file_name, message
-    """
-    entry = {
-        "timestamp": utc_iso(),
+def log(level, event, batch_id, file_name, message):
+    obj = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "level": level,
         "event": event,
         "batch_id": batch_id or "",
-        "file_name": file_name,
+        "file_name": file_name or "",
         "message": message,
     }
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    try:
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        # Never crash selector due to logging failure
-        pass
-
-
-def detect_trigger() -> str:
-    # systemd sets INVOCATION_ID for services; manual runs usually won't have it
-    return "systemd" if os.getenv("INVOCATION_ID") else "manual"
-
-
-# -----------------------------
-# TEXT NORMALIZATION
-# -----------------------------
-def clean_product_name(name: str) -> str:
-    """
-    Remove bracketed and parenthesized suffixes.
-    Examples:
-      "mélange champignons [OPUS1542]" -> "mélange champignons"
-      "Chicken Adobo (Test)" -> "Chicken Adobo"
-    """
-    if not name:
-        return name
-
-    name = re.sub(r"\[.*?\]", "", name)
-    name = re.sub(r"\(.*?\)", "", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    name = name.rstrip("- ").strip()
-    return name
-
-
-# -----------------------------
-# SQL HELPERS
-# -----------------------------
-def fetch_top10(conn) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("SET NOCOUNT ON;")
-    cur.execute("EXEC dbo.NiceLabel_GetTop10RecipesToPrint")
-
-    cols = [c[0] for c in cur.description]
-    out = []
-    while True:
-        row = cur.fetchone()
-        if not row:
-            break
-        out.append({cols[i]: row[i] for i in range(len(cols))})
-    return out
-
-
-def fetch_recipe_details(conn, code_liste: int, code_trans: int, code_nutrient_set: int) -> dict:
-    cur = conn.cursor()
-    cur.execute("SET NOCOUNT ON;")
-    cur.execute("EXEC dbo.NiceLabel_GetRecipeDetails ?, ?, ?", (code_liste, code_trans, code_nutrient_set))
-
-    parts = []
-    while True:
-        r = cur.fetchone()
-        if not r:
-            break
-        if r[0] is not None:
-            parts.append(str(r[0]))
-
-    raw = "".join(parts).strip()
-    if not raw:
-        raise RuntimeError("No JSON returned from NiceLabel_GetRecipeDetails.")
-    if not raw.endswith("}"):
-        raise RuntimeError(f"JSON appears incomplete (len={len(raw)}). Tail: {raw[-120:]}")
-    return json.loads(raw)
-
-
-# -----------------------------
-# DATA EXTRACTION HELPERS
-# -----------------------------
-def pick(item: dict, *keys, default=None):
-    """Return first non-None value among keys."""
-    for k in keys:
-        if k in item and item[k] is not None:
-            return item[k]
-    return default
-
-
-def join_allergens_short(details: dict) -> str:
-    content = details.get("content") or {}
-    allergens = content.get("allergens") or []
-    if isinstance(allergens, list):
-        s = ", ".join(str(a).strip() for a in allergens if str(a).strip())
-        return s
-    return str(allergens).strip()
-
-
-def join_ingredients_text(details: dict) -> str:
-    content = details.get("content") or {}
-    ingredients = content.get("ingredients") or []
-    if not isinstance(ingredients, list) or not ingredients:
-        return ""
-
-    parts = []
-    for ing in ingredients:
-        seq = ing.get("sequence", "")
-        name = (ing.get("name") or "").strip()
-        amount = (ing.get("amount") or "").strip()
-        unit = (ing.get("unit") or "").strip()
-
-        qty = " ".join(x for x in [amount, unit] if x).strip()
-        if qty:
-            parts.append(f"{seq}) {name} - {qty}".strip())
-        else:
-            parts.append(f"{seq}) {name}".strip())
-
-    return "; ".join(p for p in parts if p)
-
-
-def extract_site(details: dict) -> str:
-    content = details.get("content") or {}
-    ref = content.get("calcmenu_reference") or {}
-    site = ref.get("code_site")
-    return "" if site is None else str(site)
-
-
-# ✅ Better batch date parsing:
-#   StartDate -> CreatedAt/created_at -> today
-def parse_batch_date_from_top10(item: dict) -> str:
-    v = pick(item, "StartDate", "start_date", "startDate", default=None)
-    if v is None:
-        v = pick(item, "CreatedAt", "created_at", "createdAt", default=None)
-
-    if v is None:
-        return datetime.now().strftime("%Y%m%d")
-
-    if isinstance(v, datetime):
-        return v.strftime("%Y%m%d")
-    if isinstance(v, date):
-        return v.strftime("%Y%m%d")
-
-    s = str(v).strip()
-    if not s:
-        return datetime.now().strftime("%Y%m%d")
-
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%d/%m/%Y", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(s[:10], fmt).strftime("%Y%m%d")
-        except Exception:
-            pass
-
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%Y%m%d")
-    except Exception:
-        return datetime.now().strftime("%Y%m%d")
-
-
-# ✅ Site code rule you requested:
-# - If numeric: keep as-is (1 -> "1")
-# - If text: take first 3 uppercase letters/numbers
-def site_code_from_site(site: str) -> str:
-    s = (site or "").strip().upper()
-
-    if not s:
-        return "XXX"
-
-    if s.isdigit():
-        # keep numeric as-is (no zero padding)
-        try:
-            return str(int(s))
-        except Exception:
-            return s
-
-    s = re.sub(r"[^A-Z0-9]+", "", s)
-    if len(s) >= 3:
-        return s[:3]
-    return s.ljust(3, "X")
-
-
-# -----------------------------
-# SUPABASE HELPERS
-# -----------------------------
-# ✅ next seq based on prefix like: "YYYYMMDD-0010-DOM-"
-def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
-    like_pattern = f"{prefix}%"
-    resp = sb.table(table).select("batch_id").like("batch_id", like_pattern).limit(2000).execute()
-
-    existing = resp.data or []
-    max_seq = 0
-    for r in existing:
-        bid = (r.get("batch_id") or "").strip()
-        parts = bid.split("-")
-        if len(parts) >= 4 and parts[-1].isdigit():
+def validate_row(row):
+    for key, maxlen, typ in REQUIRED:
+        if key not in row or row[key] in (None, ""):
+            return False, f"Missing required field: {key}"
+        val = str(row[key])
+        if maxlen and len(val) > maxlen:
+            return False, f"Field too long: {key} (max {maxlen})"
+        if typ == "int_1_999":
             try:
-                max_seq = max(max_seq, int(parts[-1]))
-            except Exception:
-                pass
-    return max_seq + 1
+                n = int(row[key])
+            except:
+                return False, "qty must be integer"
+            if not (1 <= n <= 999):
+                return False, "qty must be 1..999"
+    return True, "OK"
 
+def _safe_name(s: str, fallback: str, max_len: int):
+    s = s or ""
+    safe = "".join(c for c in s if c.isalnum() or c in ("-", "_"))
+    safe = safe[:max_len].strip("-_")
+    return safe if safe else fallback
 
-# -----------------------------
-# MAIN
-# -----------------------------
-def main():
-    env = dotenv_values(ENV_PATH)
+def make_filename(site, batch_id):
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_site = _safe_name(site, "site", 30)
+    safe_batch = _safe_name(batch_id, "batch", 40)
+    return f"{ts}-{safe_site}-{safe_batch}.csv"
 
-    trigger = detect_trigger()
-    log_event(
-        level="INFO",
-        event="SYNC_STARTED",
-        message=f"trigger={trigger}",
-        batch_id="",
-    )
+def atomic_write_csv(file_name, rows):
+    os.makedirs(STAGING, exist_ok=True)
+    tmp_path = os.path.join(STAGING, file_name + ".tmp")
+    csv_path = os.path.join(STAGING, file_name)
 
+    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[k for k,_,_ in REQUIRED])
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r[k] for k,_,_ in REQUIRED})
+
+    os.replace(tmp_path, csv_path)
+    return csv_path
+
+def copy_with_retry(src_path, dest_dir, file_name):
+    os.makedirs(dest_dir, exist_ok=True)
+    dest_path = os.path.join(dest_dir, file_name)
+
+    last_err = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            shutil.copy2(src_path, dest_path)
+            return True, dest_path
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(RETRY_DELAY_SEC)
+    return False, last_err
+
+def write_validation_error_artifacts(site, run_id, batch_id, file_name, rows, reason, failing_row_id=None):
+    """
+    Store validation failures under:
+      /opt/nl-connector/error/<run_id>/<site>/
+
+    Writes:
+      - CSV snapshot
+      - .error.json metadata
+    """
+    safe_site = _safe_name(site, "site", 60)
+    
+    run_dir = os.path.join(ERROR, run_id, safe_site)
+    os.makedirs(run_dir, exist_ok=True)
+
+    csv_out = os.path.join(run_dir, file_name)
     try:
-        # -------- SQL SERVER --------
-        server = env.get("SQL_SERVER", "192.168.1.28,1510")
-        db = env.get("SQL_DATABASE", "CMC_2025")
-        user = env.get("SQL_USER", "egs.khalid")
-        pwd = env.get("SQL_PASSWORD") or os.environ.get("SQL_PASSWORD")
-
-        if not pwd:
-            raise SystemExit("Missing SQL_PASSWORD in /opt/nl-connector/config/.env (or export it).")
-
-        conn_str = (
-            "DRIVER={ODBC Driver 18 for SQL Server};"
-            f"SERVER={server};DATABASE={db};"
-            f"UID={user};PWD={pwd};"
-            "Encrypt=yes;TrustServerCertificate=yes;"
-        )
-
-        # -------- SUPABASE --------
-        sb_url = env.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-        sb_key = env.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        sb_table = env.get("SUPABASE_TABLE") or os.getenv("SUPABASE_TABLE") or "nl_print_queue"
-
-        if not sb_url or not sb_key:
-            raise SystemExit("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.")
-
-        sb = create_client(sb_url, sb_key)
-
-        # -------- Defaults --------
-        status_to_set = env.get("STATUS_TO_SET", "READY")
-        qty_default = int(env.get("QTY_DEFAULT", "1"))
-        language_override = (env.get("LANGUAGE_DEFAULT", "") or "").strip()
-
-        # ✅ Optional override: force site code from name (DOM, etc.)
-        # If empty, site code uses numeric site.
-        site_name_for_code = (env.get("SITE_NAME_FOR_CODE", "") or "").strip()
-
-        inserted = 0
-        failed = 0
-
-        with pyodbc.connect(conn_str, timeout=30) as conn:
-            conn.setdecoding(pyodbc.SQL_CHAR, encoding="utf-8")
-            conn.setdecoding(pyodbc.SQL_WCHAR, encoding="utf-8")
-            conn.setencoding(encoding="utf-8")
-
-            t0 = time.time()
-            try:
-                top10 = fetch_top10(conn)
-
-                log_event(
-                    level="INFO",
-                    event="CM_FETCH_OK",
-                    message=f"sp=NiceLabel_GetTop10RecipesToPrint rows={len(top10)} duration_ms={int((time.time()-t0)*1000)}",
-                    batch_id="",
-                )
-
-                print(f"Got {len(top10)} rows from dbo.NiceLabel_GetTop10RecipesToPrint")
-
-            except Exception as e:
-                log_event(
-                    level="ERROR",
-                    event="CM_FETCH_FAILED",
-                    message=f"sp=NiceLabel_GetTop10RecipesToPrint err={type(e).__name__}:{e}",
-                    batch_id="",
-                )
-                raise
-
-            if top10:
-                print("Top10 row keys:", list(top10[0].keys()))
-
-            candidates: List[Dict[str, Any]] = []
-
-            for item in top10:
-                code_liste = pick(item, "CodeListe", "code")
-                code_trans = pick(item, "CodeTrans", default=1)
-                code_nutrient_set = pick(item, "CodeNutrientSet", default=0)
-                template_name = pick(item, "TemplateName", "template", default="RestauranLabel_1")
-                qty_from_item = pick(item, "Qty", "Quantity", "qty", "quantity", "QTY", default=None)
-
-                if code_liste is None:
-                    raise RuntimeError(f"Top10 row missing CodeListe/code. Row={item}")
-
-                code_liste = int(code_liste)
-                code_trans = int(code_trans or 1)
-                code_nutrient_set = int(code_nutrient_set or 0)
-                template_name = str(template_name)
-
-                batch_date = parse_batch_date_from_top10(item)
-
-                try:
-                    details = fetch_recipe_details(conn, code_liste, code_trans, code_nutrient_set)
-                    content = details.get("content") or {}
-
-                    product_name = (content.get("title") or details.get("title") or "").strip()
-                    product_name = clean_product_name(product_name)
-
-                    description = (content.get("description") or "").strip()
-
-                    allergens_short = join_allergens_short(details)
-                    if not allergens_short:
-                        allergens_short = "None"
-
-                    ingredients_text = join_ingredients_text(details)
-
-                    site = extract_site(details) or "1"
-                    language = language_override if language_override else str(code_trans)
-
-                    try:
-                        qty = int(qty_from_item) if qty_from_item is not None and str(qty_from_item).strip() else qty_default
-                    except Exception:
-                        qty = qty_default
-
-                    candidates.append(
-                        {
-                            "_batch_date": batch_date,
-                            "site": site,
-                            "template_name": template_name,
-                            "language": language,
-                            "product_name": product_name,
-                            "allergens_short": allergens_short,
-                            "description": description,
-                            "ingredients": ingredients_text,
-                            "status": status_to_set,
-                            "qty": qty,
-                            "error_reason": None,
-                        }
-                    )
-
-                except json.JSONDecodeError as e:
-                    failed += 1
-                    log_event(
-                        level="ERROR",
-                        event="DATA_PARSE_FAILED",
-                        message=f"code_liste={code_liste} err=JSONDecodeError:{e}",
-                        batch_id="",
-                    )
-                    print(f"Failed CodeListe={code_liste}: {e}")
-
-                except Exception as e:
-                    failed += 1
-                    log_event(
-                        level="ERROR",
-                        event="DATA_PARSE_FAILED",
-                        message=f"code_liste={code_liste} err={type(e).__name__}:{e}",
-                        batch_id="",
-                    )
-                    print(f"Failed CodeListe={code_liste}: {e}")
-
-            if not candidates:
-                print("No candidates to insert. Exiting.")
-
-                log_event(
-                    level="INFO",
-                    event="SYNC_COMPLETED",
-                    message=f"inserted={inserted} failed={failed} batches=0 trigger={trigger}",
-                    batch_id="",
-                )
-
-                return 0 if failed == 0 else 1
-
-            groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-            for r in candidates:
-                key = (r["_batch_date"], r["site"])
-                groups.setdefault(key, []).append(r)
-
-            batches = len(groups)
-
-            for (batch_date, site), rows in groups.items():
-                # ✅ NEW batch_id format: YYYYMMDD-ROWCOUNT4-SITECODE-SEQ3
-                row_count_4 = f"{len(rows):04d}"
-
-                # ✅ site code source: SITE_NAME_FOR_CODE (DOM) else numeric site
-                site_code_source = site_name_for_code if site_name_for_code else site
-                site_code = site_code_from_site(site_code_source)
-
-                prefix = f"{batch_date}-{row_count_4}-{site_code}-"
-                seq = next_run_seq_for_prefix(sb, sb_table, prefix)
-
-                batch_id = f"{batch_date}-{row_count_4}-{site_code}-{seq:03d}"
-
-                payload = []
-                for r in rows:
-                    rr = dict(r)
-                    rr.pop("_batch_date", None)
-                    rr["batch_id"] = batch_id
-                    payload.append(rr)
-
-                log_event(
-                    level="INFO",
-                    event="BATCH_CREATED",
-                    message=f"rows={len(payload)} site={site}",
-                    batch_id=batch_id,
-                )
-
-                try:
-                    sb.table(sb_table).insert(payload).execute()
-                    inserted += len(payload)
-
-                    log_event(
-                        level="INFO",
-                        event="SUPABASE_INSERT_OK",
-                        message=f"rows={len(payload)} site={site}",
-                        batch_id=batch_id,
-                    )
-
-                    print(f"Inserted batch_id={batch_id} site={site} rows={len(payload)}")
-
-                except Exception as e:
-                    failed += len(payload)
-
-                    log_event(
-                        level="ERROR",
-                        event="SUPABASE_INSERT_FAILED",
-                        message=f"rows={len(payload)} site={site} err={type(e).__name__}:{e}",
-                        batch_id=batch_id,
-                    )
-
-                    print(f"FAILED inserting batch_id={batch_id} site={site} rows={len(payload)} err={e}")
-
-        print(f"\nDONE inserted={inserted} failed={failed} table={sb_table}")
-
-        log_event(
-            level="INFO",
-            event="SYNC_COMPLETED",
-            message=f"inserted={inserted} failed={failed} batches={batches} trigger={trigger}",
-            batch_id="",
-        )
-
-        return 0 if failed == 0 else 1
-
+        with open(csv_out, "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=[k for k,_,_ in REQUIRED])
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r.get(k, "") for k,_,_ in REQUIRED})
     except Exception as e:
-        log_event(
-            level="ERROR",
-            event="SYNC_FAILED",
-            message=f"err={type(e).__name__}:{e}",
-            batch_id="",
-        )
-        raise
+        log("ERROR", "UNEXPECTED_ERROR", batch_id, file_name, f"Failed writing error CSV snapshot: {e}")
 
+    meta_out = os.path.join(run_dir, file_name + ".error.json")
+    try:
+        with open(meta_out, "w", encoding="utf-8") as f:
+            json.dump({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "site": site,
+                "batch_id": batch_id,
+                "file_name": file_name,
+                "failing_row_id": failing_row_id,
+                "error_reason": reason,
+                "rows_count": len(rows),
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log("ERROR", "UNEXPECTED_ERROR", batch_id, file_name, f"Failed writing error metadata: {e}")
+
+def mark_batch_error_row_owned(sb, table, batch_id, failing_row_id, reason):
+    """
+    Goal:
+      - Block the whole batch from reprocessing: set status=ERROR for ALL rows in batch_id
+      - Assign error_reason ONLY to the failing row (identified by id)
+      - Do NOT overwrite other rows' error_reason (should stay NULL)
+
+    We do it in two safe steps:
+      1) batch: status=ERROR (no error_reason)
+      2) failing row: status=ERROR + error_reason=reason (fallback if column doesn't exist)
+    """
+    try:
+        sb.table(table).update({"status": "ERROR"}).eq("batch_id", batch_id).execute()
+    except Exception as e:
+        log("ERROR", "UNEXPECTED_ERROR", batch_id, "", f"Failed to mark batch status ERROR: {e}")
+        return
+
+    if not failing_row_id:
+        return
+
+    try:
+        sb.table(table).update({"status": "ERROR", "error_reason": reason}).eq("id", failing_row_id).execute()
+        return
+    except Exception:
+
+        try:
+            sb.table(table).update({"status": "ERROR"}).eq("id", failing_row_id).execute()
+        except Exception as e:
+            log("ERROR", "UNEXPECTED_ERROR", batch_id, "", f"Failed to set failing row ERROR: {e}")
+
+def main():
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    load_dotenv("/opt/nl-connector/config/.env")
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    table = os.getenv("SUPABASE_TABLE")
+
+    if not url or not key or not table:
+        log("ERROR", "VALIDATION_FAILED", "", "", "Missing SUPABASE env config")
+        return 1
+
+    sb = create_client(url, key)
+
+    resp = sb.table(table).select("*").eq("status", "READY").limit(500).execute()
+    items = resp.data or []
+    if not items:
+        log("INFO", "BATCH_CREATED", "", "", "No READY rows found")
+        return 0
+
+    batches = {}
+    for r in items:
+        batch_id = r.get("batch_id", "")
+        ok, reason = validate_row(r)
+
+        if not ok:
+            site = r.get("site", "site")
+            failing_row_id = r.get("id")
+
+            file_name = make_filename(site, batch_id or "batch")
+
+            log("ERROR", "VALIDATION_FAILED", batch_id, file_name, f"{reason} (failing_row_id={failing_row_id})")
+
+            batch_rows = [x for x in items if x.get("batch_id") == batch_id] or [r]
+            write_validation_error_artifacts(
+                site=site,
+                run_id=run_id,
+                batch_id=batch_id,
+                file_name=file_name,
+                rows=batch_rows,
+                reason=reason,
+                failing_row_id=failing_row_id
+            )
+
+            mark_batch_error_row_owned(sb, table, batch_id, failing_row_id, reason)
+
+            return 1
+
+        batches.setdefault(r["batch_id"], []).append(r)
+
+    for batch_id, rows in batches.items():
+        site = rows[0]["site"]
+        file_name = make_filename(site, batch_id)
+
+        log("INFO", "BATCH_CREATED", batch_id, file_name, f"Rows={len(rows)}")
+
+        csv_path = atomic_write_csv(file_name, rows)
+
+        ok, info = copy_with_retry(csv_path, DEST, file_name)
+        if not ok:
+            log("ERROR", "COPY_FAILED", batch_id, file_name, info)
+            return 2
+
+        archive_date = datetime.now().strftime("%Y%m%d")
+        archive_run = run_id
+
+        archive_dir = os.path.join(ARCHIVE, archive_date, archive_run)
+        os.makedirs(archive_dir, exist_ok=True)
+
+        shutil.move(csv_path, os.path.join(archive_dir, file_name))
+
+        log("INFO", "BATCH_COPIED", batch_id, file_name, f"Delivered to {info}")
+
+        ids = [r["id"] for r in rows if "id" in r]
+        if ids:
+            sb.table(table).update({"status": "SENT"}).in_("id", ids).execute()
+
+    return 0
 
 if __name__ == "__main__":
-    raise SystemExit(main())
-
+    try:
+        sys.exit(main())
+    except Exception as e:
+        log("ERROR", "UNEXPECTED_ERROR", "", "", str(e))
+        sys.exit(3)
