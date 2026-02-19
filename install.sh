@@ -124,8 +124,8 @@ install_app_files() {
 install_config_files() {
   echo "Installing config files..."
   install -m 640 ./config/config.env "$CFG_DIR/.env"
-  install -m 600 ./config/smb-credentials "$CFG_DIR/smb-credentials"
-  chown root:root "$CFG_DIR/.env" "$CFG_DIR/smb-credentials"
+  install -m 640 ./config/smb-credentials "$CFG_DIR/smb-credentials"
+  chown root:nlconnector "$CFG_DIR/.env" "$CFG_DIR/smb-credentials"
 }
 
 setup_venv() {
@@ -148,11 +148,12 @@ setup_mount() {
   echo "Setting up SMB mount..."
   mkdir -p "$MOUNT_POINT"
 
-  local UID GID
-  UID="$(id -u nlconnector)"
-  GID="$(id -g nlconnector)"
+  local USER_UID USER_GID
+  USER_UID="$(id -u nlconnector)"
+  USER_GID="$(id -g nlconnector)"
 
-  local FSTAB_LINE="//${WINDOWS_IP}/${SHARE_NAME}  ${MOUNT_POINT}  cifs  credentials=${CFG_DIR}/smb-credentials,uid=${UID},gid=${GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix  0  0"
+  local FSTAB_LINE="//${WINDOWS_IP}/${SHARE_NAME}  ${MOUNT_POINT}  cifs  credentials=${CFG_DIR}/smb-credentials,uid=${USER_UID},gid=${USER_GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix  0  0"
+
 
   if grep -q "${MOUNT_POINT}  cifs" /etc/fstab; then
     echo "fstab: entry already exists for ${MOUNT_POINT}"

@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 from supabase import create_client
 
 import time
-import traceback
+import traceback 
 
 ENV_PATH = "/opt/nl-connector/config/.env"
 
@@ -18,6 +18,7 @@ API1_FILE_NAME = "selector.py"
 
 
 def utc_iso() -> str:
+    
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
 
@@ -49,12 +50,13 @@ def log_event(
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
+        
         pass
 
 
 def detect_trigger() -> str:
+   
     return "systemd" if os.getenv("INVOCATION_ID") else "manual"
-
 
 def clean_product_name(name: str) -> str:
     """
@@ -107,7 +109,6 @@ def fetch_recipe_details(conn, code_liste: int, code_trans: int, code_nutrient_s
     if not raw.endswith("}"):
         raise RuntimeError(f"JSON appears incomplete (len={len(raw)}). Tail: {raw[-120:]}")
     return json.loads(raw)
-
 
 def pick(item: dict, *keys, default=None):
     """Return first non-None value among keys."""
@@ -231,6 +232,7 @@ def main():
     )
 
     try:
+
         server = env.get("SQL_SERVER", "192.168.1.28,1510")
         db = env.get("SQL_DATABASE", "CMC_2025")
         user = env.get("SQL_USER", "egs.khalid")
@@ -280,8 +282,6 @@ def main():
                     batch_id="",
                 )
 
-                print(f"Got {len(top10)} rows from dbo.NiceLabel_GetTop10RecipesToPrint")
-
             except Exception as e:
                 log_event(
                     level="ERROR",
@@ -291,8 +291,6 @@ def main():
                 )
                 raise
 
-            if top10:
-                print("Top10 row keys:", list(top10[0].keys()))
 
             candidates: List[Dict[str, Any]] = []
 
@@ -392,6 +390,7 @@ def main():
             batches = len(groups)
 
             for (batch_date, site), rows in groups.items():
+
                 row_count_4 = f"{len(rows):04d}"
 
                 site_code_source = site_name_for_code if site_name_for_code else site
