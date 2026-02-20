@@ -196,20 +196,36 @@ CRON
   chmod +x /etc/cron.daily/nl-connector-retention
 }
 
+# final_checks() {
+#   echo "Final checks..."
+#   systemctl status "${CONNECTOR_NAME}.timer" --no-pager || true
+#   systemctl status "${SELECTOR_NAME}.timer" --no-pager || true
+
+#   echo "Running selector once manually (as nlconnector)..."
+#   sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/selector.py" || true
+
+#   echo "Running connector once manually (as nlconnector)..."
+#   sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/connector.py" || true
+
+#   echo "DONE."
+#   echo "Logs: $LOG_DIR/connector.log"
+#   echo "Mount: $MOUNT_POINT"
+# }
+
 final_checks() {
   echo "Final checks..."
   systemctl status "${CONNECTOR_NAME}.timer" --no-pager || true
   systemctl status "${SELECTOR_NAME}.timer" --no-pager || true
 
-  echo "Running selector once manually (as nlconnector)..."
-  sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/selector.py" || true
-
-  echo "Running connector once manually (as nlconnector)..."
-  sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/connector.py" || true
+  echo "Verifying venv + deps..."
+  sudo -u nlconnector "$VENV/bin/python" -c "import supabase, dotenv, pyodbc; print('deps OK')" || true
 
   echo "DONE."
   echo "Logs: $LOG_DIR/connector.log"
   echo "Mount: $MOUNT_POINT"
+  echo "Tip: run a manual test with:"
+  echo "  sudo systemctl start ${SELECTOR_NAME}.service"
+  echo "  sudo systemctl start ${CONNECTOR_NAME}.service"
 }
 
 main() {

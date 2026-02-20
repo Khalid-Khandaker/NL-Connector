@@ -25,8 +25,9 @@ REQUIRED = [
     ("qty", None, "int_1_999"),
 ]
 
+OPTIONAL_CSV_FIELDS = ["ingredients"]
 
-CSV_HEADERS = [k for k, _, _ in REQUIRED] + ["output_file_name"]
+CSV_HEADERS = [k for k, _, _ in REQUIRED] + OPTIONAL_CSV_FIELDS + ["output_file_name"]
 
 
 def log(level, event, batch_id, file_name, message):
@@ -101,6 +102,10 @@ def atomic_write_csv(file_name, rows):
         w.writeheader()
         for r in rows:
             row_data = {k: r.get(k, "") for k, _, _ in REQUIRED}
+
+            for k in OPTIONAL_CSV_FIELDS:
+                row_data[k] = r.get(k, "") or ""
+
             row_data["output_file_name"] = output_name
             w.writerow(row_data)
 
@@ -131,11 +136,15 @@ def write_validation_error_artifacts(site, run_id, batch_id, file_name, rows, re
 
     csv_out = os.path.join(run_dir, file_name)
     try:
+        error_fields = [k for k, _, _ in REQUIRED] + OPTIONAL_CSV_FIELDS
         with open(csv_out, "w", encoding="utf-8", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=[k for k, _, _ in REQUIRED])
+            w = csv.DictWriter(f, fieldnames=error_fields)
             w.writeheader()
             for r in rows:
-                w.writerow({k: r.get(k, "") for k, _, _ in REQUIRED})
+                row_out = {k: r.get(k, "") for k, _, _ in REQUIRED}
+                for k in OPTIONAL_CSV_FIELDS:
+                    row_out[k] = r.get(k, "") or ""
+                w.writerow(row_out)
     except Exception as e:
         log("ERROR", "UNEXPECTED_ERROR", batch_id, file_name, f"Failed writing error CSV snapshot: {e}")
 

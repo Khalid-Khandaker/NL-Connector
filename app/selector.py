@@ -298,7 +298,7 @@ def main():
                 code_liste = pick(item, "CodeListe", "code")
                 code_trans = pick(item, "CodeTrans", default=1)
                 code_nutrient_set = pick(item, "CodeNutrientSet", default=0)
-                template_name = pick(item, "TemplateName", "template", default="RestauranLabel_1")
+                template_name = pick(item, "TemplateName", "template", default="RestaurantLabel_1")
                 qty_from_item = pick(item, "Qty", "Quantity", "qty", "quantity", "QTY", default=None)
 
                 if code_liste is None:
@@ -347,6 +347,7 @@ def main():
                             "status": status_to_set,
                             "qty": qty,
                             "error_reason": None,
+                            "output_file": None,
                         }
                     )
 
