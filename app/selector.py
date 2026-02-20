@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 from supabase import create_client
 
 import time
-import traceback 
+import traceback  
 
 ENV_PATH = "/opt/nl-connector/config/.env"
 
@@ -18,7 +18,7 @@ API1_FILE_NAME = "selector.py"
 
 
 def utc_iso() -> str:
-    
+
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
 
@@ -31,11 +31,7 @@ def log_event(
     file_name: str = API1_FILE_NAME,
     log_path: str = LOG_PATH_DEFAULT,
 ) -> None:
-    """
-    Append one JSON log line to connector.log
-    Required fields per spec:
-      timestamp, level, event, batch_id, file_name, message
-    """
+
     entry = {
         "timestamp": utc_iso(),
         "level": level,
@@ -50,21 +46,16 @@ def log_event(
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
-        
+
         pass
 
 
 def detect_trigger() -> str:
-   
+
     return "systemd" if os.getenv("INVOCATION_ID") else "manual"
 
+
 def clean_product_name(name: str) -> str:
-    """
-    Remove bracketed and parenthesized suffixes.
-    Examples:
-      "mélange champignons [OPUS1542]" -> "mélange champignons"
-      "Chicken Adobo (Test)" -> "Chicken Adobo"
-    """
     if not name:
         return name
 
@@ -110,8 +101,9 @@ def fetch_recipe_details(conn, code_liste: int, code_trans: int, code_nutrient_s
         raise RuntimeError(f"JSON appears incomplete (len={len(raw)}). Tail: {raw[-120:]}")
     return json.loads(raw)
 
+
 def pick(item: dict, *keys, default=None):
-    """Return first non-None value among keys."""
+
     for k in keys:
         if k in item and item[k] is not None:
             return item[k]
@@ -202,7 +194,6 @@ def site_code_from_site(site: str) -> str:
         return s[:3]
     return s.ljust(3, "X")
 
-
 def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
     like_pattern = f"{prefix}%"
     resp = sb.table(table).select("batch_id").like("batch_id", like_pattern).limit(2000).execute()
@@ -219,7 +210,6 @@ def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
                 pass
     return max_seq + 1
 
-
 def main():
     env = dotenv_values(ENV_PATH)
 
@@ -232,7 +222,6 @@ def main():
     )
 
     try:
-
         server = env.get("SQL_SERVER", "192.168.1.28,1510")
         db = env.get("SQL_DATABASE", "CMC_2025")
         user = env.get("SQL_USER", "egs.khalid")
@@ -282,6 +271,7 @@ def main():
                     batch_id="",
                 )
 
+
             except Exception as e:
                 log_event(
                     level="ERROR",
@@ -290,7 +280,6 @@ def main():
                     batch_id="",
                 )
                 raise
-
 
             candidates: List[Dict[str, Any]] = []
 
@@ -347,7 +336,6 @@ def main():
                             "status": status_to_set,
                             "qty": qty,
                             "error_reason": None,
-                            "output_file": None,
                         }
                     )
 
@@ -391,7 +379,6 @@ def main():
             batches = len(groups)
 
             for (batch_date, site), rows in groups.items():
-
                 row_count_4 = f"{len(rows):04d}"
 
                 site_code_source = site_name_for_code if site_name_for_code else site
@@ -464,3 +451,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
