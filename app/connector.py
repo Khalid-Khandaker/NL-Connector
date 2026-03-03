@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from supabase import create_client
 
+import re
+
 BASE = "/opt/nl-connector"
 STAGING = f"{BASE}/staging"
 ARCHIVE = f"{BASE}/archive"
@@ -29,6 +31,56 @@ OPTIONAL_CSV_FIELDS = ["ingredients"]
 
 CSV_HEADERS = [k for k, _, _ in REQUIRED] + OPTIONAL_CSV_FIELDS + ["output_file_name"]
 
+def _clean_single_ingredient(text: str) -> str:
+    if not text:
+        return ""
+    text = text.strip()
+    text = re.sub(r"^\d+\)\s*", "", text)
+    if " - " in text:
+        text = text.split(" - ", 1)[0]
+    text = re.sub(r"\[.*?\]", "", text)
+    text = re.sub(r"\(.*?\)", "", text)
+    if "-" in text:
+        parts = text.split("-")
+        text = parts[0]
+    text = re.sub(r"\b\d+%\b", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def format_ingredients(ingredients):
+    """
+    Accepts:
+    - CalcMenu JSON list
+    - Raw string (like Notepad.txt format)
+
+    Returns:
+    Clean comma-separated string
+    """
+
+    if not ingredients:
+        return ""
+
+    if isinstance(ingredients, list):
+        cleaned = []
+        for item in ingredients:
+            name = item.get("name", "")
+            clean = _clean_single_ingredient(name)
+            if clean:
+                cleaned.append(clean)
+        return ", ".join(cleaned)
+
+    raw = str(ingredients)
+    parts = raw.split(";")
+
+    cleaned = []
+    for part in parts:
+        clean = _clean_single_ingredient(part)
+        if clean:
+            cleaned.append(clean)
+
+    return ", ".join(cleaned)
 
 def log(level, event, batch_id, file_name, message):
     obj = {
@@ -84,34 +136,65 @@ def _safe_name(s: str, fallback: str, max_len: int):
 
 
 def make_filename(site, batch_id):
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    safe_site = _safe_name(site, "site", 30)
-    safe_batch = _safe_name(batch_id, "batch", 40)
-    return f"{ts}-{safe_site}-{safe_batch}.csv"
+
+    date_part = str(batch_id)[:8]
+
+    site_part = str(site).strip().upper()[:3]
+
+    if not date_part.isdigit():
+        date_part = datetime.now().strftime("%Y%m%d")
+
+    if not site_part:
+        site_part = "SITE"
+
+    return f"{site_part}_{date_part}.csv"
 
 
-def atomic_write_csv(file_name, rows):
+def atomic_write_csv(file_name, rows, template_base: str, label_base: str):
     os.makedirs(STAGING, exist_ok=True)
     tmp_path = os.path.join(STAGING, file_name + ".tmp")
     csv_path = os.path.join(STAGING, file_name)
 
-    output_name = os.path.splitext(file_name)[0]
+    output_stem = os.path.splitext(file_name)[0]
 
     with open(tmp_path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_HEADERS)
         w.writeheader()
+
         for r in rows:
             row_data = {k: r.get(k, "") for k, _, _ in REQUIRED}
 
-            for k in OPTIONAL_CSV_FIELDS:
-                row_data[k] = r.get(k, "") or ""
+            raw_template = str(row_data.get("template_name") or "").strip()
 
-            row_data["output_file_name"] = output_name
+            if raw_template and not raw_template.lower().endswith(".nlbl"):
+                raw_template += ".nlbl"
+
+            if template_base and raw_template:
+                row_data["template_name"] = (
+                    template_base.rstrip("\\/") + "\\" +
+                    raw_template.lstrip("\\/")
+                )
+            else:
+                row_data["template_name"] = raw_template
+                
+            for k in OPTIONAL_CSV_FIELDS:
+                if k == "ingredients":
+                    row_data[k] = format_ingredients(r.get(k))
+                else:
+                    row_data[k] = r.get(k, "") or ""
+            output_file = output_stem + ".pdf"
+
+            if label_base:
+                row_data["output_file_name"] = (
+                    label_base.rstrip("\\/") + "\\" + output_file
+                )
+            else:
+                row_data["output_file_name"] = output_file
+
             w.writerow(row_data)
 
     os.replace(tmp_path, csv_path)
     return csv_path
-
 
 def copy_with_retry(src_path, dest_dir, file_name):
     os.makedirs(dest_dir, exist_ok=True)
@@ -194,6 +277,8 @@ def main():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     table = os.getenv("SUPABASE_TABLE")
+    template_base = os.getenv("TEMPLATE_PATH", "").strip()
+    label_base = os.getenv("LABEL_PATH", "").strip()
 
     if not url or not key or not table:
         log("ERROR", "VALIDATION_FAILED", "", "", "Missing SUPABASE env config")
@@ -261,7 +346,7 @@ def main():
 
         log("INFO", "BATCH_CREATED", batch_id, file_name, f"Rows={len(rows)}")
 
-        csv_path = atomic_write_csv(file_name, rows)
+        csv_path = atomic_write_csv(file_name, rows, template_base, label_base)
 
         ok, info = copy_with_retry(csv_path, DEST, file_name)
         if not ok:
@@ -290,5 +375,4 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception as e:
         log("ERROR", "UNEXPECTED_ERROR", "", "", str(e))
-        sys.exit(3)
-
+        sys.exit(3) 

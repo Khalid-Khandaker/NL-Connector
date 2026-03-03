@@ -40,6 +40,7 @@ check_required_files() {
   [ -f "./systemd/nl-connector.timer" ] || die "Missing ./systemd/nl-connector.timer"
   [ -f "./systemd/selector.service" ] || die "Missing ./systemd/selector.service"
   [ -f "./systemd/selector.timer" ] || die "Missing ./systemd/selector.timer"
+  [ -f "./app/control_api.py" ] || die "Missing ./app/control_api.py"
 }
 
 preflight_checks() {
@@ -114,6 +115,10 @@ install_app_files() {
   install -m 755 ./app/connector.py "$APP_DIR/connector.py"
   install -m 755 ./app/selector.py "$APP_DIR/selector.py"
   install -m 755 ./app/cleanup_retention.sh "$APP_DIR/cleanup_retention.sh"
+
+  install -m 755 ./app/control_api.py "$APP_DIR/control_api.py"
+  chown nlconnector:nlconnector "$APP_DIR/control_api.py" || true
+
   if [ -f "./app/requirements.txt" ]; then
     install -m 644 ./app/requirements.txt "$APP_DIR/requirements.txt"
   fi
@@ -196,29 +201,13 @@ CRON
   chmod +x /etc/cron.daily/nl-connector-retention
 }
 
-# final_checks() {
-#   echo "Final checks..."
-#   systemctl status "${CONNECTOR_NAME}.timer" --no-pager || true
-#   systemctl status "${SELECTOR_NAME}.timer" --no-pager || true
-
-#   echo "Running selector once manually (as nlconnector)..."
-#   sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/selector.py" || true
-
-#   echo "Running connector once manually (as nlconnector)..."
-#   sudo -u nlconnector "$VENV/bin/python" "$APP_DIR/connector.py" || true
-
-#   echo "DONE."
-#   echo "Logs: $LOG_DIR/connector.log"
-#   echo "Mount: $MOUNT_POINT"
-# }
-
 final_checks() {
   echo "Final checks..."
   systemctl status "${CONNECTOR_NAME}.timer" --no-pager || true
   systemctl status "${SELECTOR_NAME}.timer" --no-pager || true
 
   echo "Verifying venv + deps..."
-  sudo -u nlconnector "$VENV/bin/python" -c "import supabase, dotenv, pyodbc; print('deps OK')" || true
+  sudo -u nlconnector "$VENV/bin/python" -c "import supabase, dotenv, pyodbc, flask; print('deps OK')" || true
 
   echo "DONE."
   echo "Logs: $LOG_DIR/connector.log"

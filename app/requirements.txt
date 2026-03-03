@@ -1,3 +1,4 @@
 supabase
 python-dotenv
 pyodbc
+flask
