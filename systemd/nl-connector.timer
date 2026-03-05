@@ -1,9 +1,9 @@
 [Unit]
-Description=Run NiceLabel connector run every minute
+Description=Run NiceLabel connector run every 2 seconds
 
 [Timer]
 OnBootSec=30
-OnUnitActiveSec=60
+OnUnitActiveSec=2
 Unit=nl-connector.service
 
 [Install]

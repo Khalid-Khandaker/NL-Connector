@@ -17,7 +17,6 @@ CONNECTOR_NAME="nl-connector"
 CONNECTOR_SERVICE="/etc/systemd/system/${CONNECTOR_NAME}.service"
 CONNECTOR_TIMER="/etc/systemd/system/${CONNECTOR_NAME}.timer"
 
-# keep your naming as-is
 SELECTOR_NAME="selector"
 SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
 SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
@@ -46,22 +45,18 @@ check_required_files() {
 preflight_checks() {
   echo "Running preflight checks..."
 
-  # basic tools
   command -v systemctl >/dev/null 2>&1 || die "systemd not available (systemctl missing)"
   command -v python3 >/dev/null 2>&1 || die "python3 not installed"
 
-  # required inputs
   [ -n "$WINDOWS_IP" ] || die "WINDOWS_IP not set. Example: sudo WINDOWS_IP=192.168.254.103 ./install.sh"
   [ -n "$SHARE_NAME" ] || die "SHARE_NAME empty (default is NiceLabelIn)"
 
-  # check we can write to system locations before doing anything
   mkdir -p /opt/.nlconnector_preflight_test 2>/dev/null || die "Cannot write to /opt"
   rmdir /opt/.nlconnector_preflight_test 2>/dev/null || true
 
   mkdir -p /var/log/.nlconnector_preflight_test 2>/dev/null || die "Cannot write to /var/log"
   rmdir /var/log/.nlconnector_preflight_test 2>/dev/null || true
 
-  # check config file readability
   [ -r "./config/config.env" ] || die "config/config.env not readable"
   [ -r "./config/smb-credentials" ] || die "config/smb-credentials not readable"
 
@@ -82,7 +77,7 @@ install_deps() {
   apt-get update -y
   apt-get install -y python3 python3-venv python3-pip cifs-utils unixodbc curl ca-certificates gnupg lsb-release
 
-  # --- Microsoft ODBC Driver 18 (auto install) ---
+  # Microsoft ODBC Driver 18
   # Works for Ubuntu 20.04/22.04/24.04 by using VERSION_ID from /etc/os-release.
   echo "Installing Microsoft ODBC Driver 18 for SQL Server..."
   . /etc/os-release
@@ -97,7 +92,7 @@ EOF
   apt-get update -y
   ACCEPT_EULA=Y apt-get install -y msodbcsql18
 
-  # optional: sqlcmd tools (comment out if you don't want it)
+  # optional
   # ACCEPT_EULA=Y apt-get install -y mssql-tools18
 }
 

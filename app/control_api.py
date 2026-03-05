@@ -12,11 +12,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "")
 
-# What value should I give here?
 API_KEY = os.getenv("CONTROL_API_KEY", "")
-HOST = os.getenv("CONTROL_API_HOST", "127.0.0.1")
+HOST = os.getenv("CONTROL_API_HOST", "192.168.254.106")
 PORT = int(os.getenv("CONTROL_API_PORT", "8088"))
-# --- --- ---
 
 VENV_PY = "/opt/nl-connector/app/.venv/bin/python"
 SELECTOR_PATH = "/opt/nl-connector/app/selector.py"
@@ -26,14 +24,12 @@ app = Flask(__name__)
 
 
 def _auth_ok() -> bool:
-    # If API_KEY is empty, allow (demo mode). Otherwise require header.
     if not API_KEY:
         return True
     return request.headers.get("X-API-Key", "") == API_KEY
 
 
 def _run_script(script_path: str):
-    # Run the script once and return code and outputs
     p = subprocess.run(
         [VENV_PY, script_path],
         capture_output=True,
@@ -61,7 +57,6 @@ def queue():
 
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    # Simple counts by reading ID
     def count_status(st: str) -> int:
         r = sb.table(SUPABASE_TABLE).select("id").eq("status", st).limit(10000).execute()
         return len(r.data or [])
