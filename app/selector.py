@@ -10,11 +10,11 @@ from supabase import create_client
 
 import time 
 
-ENV_PATH = "/opt/nl-connector/config/.env"
 
+ENV_PATH = "/opt/nl-connector/config/.env"
+SERVICE_NAME = "selector"
 LOG_PATH_DEFAULT = "/var/log/nl-connector/connector.log"
 API1_FILE_NAME = "selector.py"
-
 LOCK_PATH = "/var/lock/nl-selector.lock"
 
 def acquire_lock() -> bool:
@@ -38,15 +38,7 @@ def utc_iso() -> str:
     return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
 
-def log_event(
-    *,
-    level: str,
-    event: str,
-    message: str,
-    batch_id: str = "",
-    file_name: str = API1_FILE_NAME,
-    log_path: str = LOG_PATH_DEFAULT,
-) -> None:
+def log_event(*, level: str, event: str, message: str, batch_id: str = "", file_name: str = API1_FILE_NAME, log_path: str = LOG_PATH_DEFAULT, run_id: str = "",) -> None:
     """
     Append one JSON log line to connector.log
     Required fields per spec:
@@ -54,6 +46,9 @@ def log_event(
     """
     entry = {
         "timestamp": utc_iso(),
+        "service": SERVICE_NAME,
+        "run_id": run_id or "",
+        "pid": os.getpid(),
         "level": level,
         "event": event,
         "batch_id": batch_id or "",
@@ -237,21 +232,23 @@ def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
     return max_seq + 1
 
 def main():
+    env = dotenv_values(ENV_PATH)
+    
+    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+    trigger = detect_trigger()
+    log_event(
+        level="INFO",
+        event="SYNC_STARTED",
+        message=f"trigger={trigger}",
+        run_id=run_id,
+        batch_id="",
+    )
+    
+    if not acquire_lock():
+        log_event(level="INFO", event="RUN_SKIPPED", run_id=run_id, message="selector lock exists; another run active")
+        return 0
     try:
-        env = dotenv_values(ENV_PATH)
-
-        trigger = detect_trigger()
-        log_event(
-            level="INFO",
-            event="SYNC_STARTED",
-            message=f"trigger={trigger}",
-            batch_id="",
-        )
-        
-        if not acquire_lock():
-            log_event(level="INFO", event="RUN_SKIPPED", message="selector lock exists; another run active")
-            return 0
-
         try:
             server = env.get("SQL_SERVER", "192.168.1.28,1510")
             db = env.get("SQL_DATABASE", "CMC_2025")
@@ -298,6 +295,7 @@ def main():
                     log_event(
                         level="INFO",
                         event="CM_FETCH_OK",
+                        run_id=run_id,
                         message=f"sp=NiceLabel_GetTop10RecipesToPrint rows={len(top10)} duration_ms={int((time.time()-t0)*1000)}",
                         batch_id="",
                     )
@@ -307,6 +305,7 @@ def main():
                     log_event(
                         level="ERROR",
                         event="CM_FETCH_FAILED",
+                        run_id=run_id,
                         message=f"sp=NiceLabel_GetTop10RecipesToPrint err={type(e).__name__}:{e}",
                         batch_id="",
                     )
@@ -375,6 +374,7 @@ def main():
                         log_event(
                             level="ERROR",
                             event="DATA_PARSE_FAILED",
+                            run_id=run_id,
                             message=f"code_liste={code_liste} err=JSONDecodeError:{e}",
                             batch_id="",
                         )
@@ -385,6 +385,7 @@ def main():
                         log_event(
                             level="ERROR",
                             event="DATA_PARSE_FAILED",
+                            run_id=run_id,
                             message=f"code_liste={code_liste} err={type(e).__name__}:{e}",
                             batch_id="",
                         )
@@ -396,6 +397,7 @@ def main():
                     log_event(
                         level="INFO",
                         event="SYNC_COMPLETED",
+                        run_id=run_id,
                         message=f"inserted={inserted} failed={failed} batches=0 trigger={trigger}",
                         batch_id="",
                     )
@@ -430,6 +432,7 @@ def main():
                     log_event(
                         level="INFO",
                         event="BATCH_CREATED",
+                        run_id=run_id,
                         message=f"rows={len(payload)} site={site}",
                         batch_id=batch_id,
                     )
@@ -441,6 +444,7 @@ def main():
                         log_event(
                             level="INFO",
                             event="SUPABASE_INSERT_OK",
+                            run_id=run_id,
                             message=f"rows={len(payload)} site={site}",
                             batch_id=batch_id,
                         )
@@ -453,6 +457,7 @@ def main():
                         log_event(
                             level="ERROR",
                             event="SUPABASE_INSERT_FAILED",
+                            run_id=run_id,
                             message=f"rows={len(payload)} site={site} err={type(e).__name__}:{e}",
                             batch_id=batch_id,
                         )
@@ -464,6 +469,7 @@ def main():
             log_event(
                 level="INFO",
                 event="SYNC_COMPLETED",
+                run_id=run_id,
                 message=f"inserted={inserted} failed={failed} batches={batches} trigger={trigger}",
                 batch_id="",
             )
@@ -474,6 +480,7 @@ def main():
             log_event(
                 level="ERROR",
                 event="SYNC_FAILED",
+                run_id=run_id,
                 message=f"err={type(e).__name__}:{e}",
                 batch_id="",
             )

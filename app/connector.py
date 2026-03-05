@@ -6,19 +6,16 @@ from supabase import create_client
 import re
 
 LOCK_PATH = "/var/lock/nl-connector.lock"
-
 BASE = "/opt/nl-connector"
 STAGING = f"{BASE}/staging"
 ARCHIVE = f"{BASE}/archive"
 ERROR = f"{BASE}/error"
 LOG_PATH = "/var/log/nl-connector/connector.log"
 DEST = "/mnt/nicelabel/in"
-
+SERVICE_NAME = "connector"
 RETRIES = 3
 RETRY_DELAY_SEC = 10
-
 COPY_INTERVAL_SEC = 5
-
 REQUIRED = [
     ("batch_id", 40, "text"),
     ("site", 60, "text"),
@@ -28,9 +25,7 @@ REQUIRED = [
     ("allergens_short", 180, "text"),
     ("qty", None, "int_1_999"),
 ]
-
 OPTIONAL_CSV_FIELDS = ["ingredients"]
-
 CSV_HEADERS = [k for k, _, _ in REQUIRED] + OPTIONAL_CSV_FIELDS + ["output_file_name"]
 
 def acquire_global_lock() -> bool:
@@ -100,9 +95,12 @@ def format_ingredients(ingredients):
 
     return ", ".join(cleaned)
 
-def log(level, event, batch_id, file_name, message):
+def log(level, event, batch_id, file_name, message, run_id=""):
     obj = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "service": SERVICE_NAME,
+        "run_id": run_id or "",
+        "pid": os.getpid(),
         "level": level,
         "event": event,
         "batch_id": batch_id or "",
@@ -409,7 +407,8 @@ def main():
             log("INFO", "EMPTY_QUEUE", "", "", "No READY rows found")
             return 0
 
-        log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}")
+        # log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}")
+        log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}", run_id=run_id)
 
         batches = {}
         errors = []
