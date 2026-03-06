@@ -6,18 +6,44 @@ RETENTION_DAYS=30
 ERROR_DIR="/opt/nl-connector/error"
 ARCHIVE_DIR="/opt/nl-connector/archive"
 
-if [ -d "$ERROR_DIR" ]; then
-  find "$ERROR_DIR" \
-    -mindepth 1 -maxdepth 1 \
-    -type d \
-    -mtime +$RETENTION_DAYS \
-    -exec rm -rf {} +
-fi
+LOG_DIR="/var/log/nl-connector"
+LOG_FILE="$LOG_DIR/cleanup.log"
 
-if [ -d "$ARCHIVE_DIR" ]; then
-  find "$ARCHIVE_DIR" \
+mkdir -p "$LOG_DIR"
+
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+echo "$(ts) cleanup started retention_days=$RETENTION_DAYS" >> "$LOG_FILE"
+
+cleanup_dir() {
+  local target_dir="$1"
+  local label="$2"
+
+  if [ ! -d "$target_dir" ]; then
+    echo "$(ts) $label skipped dir_missing=$target_dir" >> "$LOG_FILE"
+    return 0
+  fi
+
+  local count
+  count=$(find "$target_dir" -mindepth 1 -maxdepth 1 -type d -mtime +"$RETENTION_DAYS" | wc -l | tr -d ' ')
+
+  if [ "$count" = "0" ]; then
+    echo "$(ts) $label nothing_to_delete dir=$target_dir" >> "$LOG_FILE"
+    return 0
+  fi
+
+  echo "$(ts) $label deleting count=$count dir=$target_dir" >> "$LOG_FILE"
+
+  find "$target_dir" \
     -mindepth 1 -maxdepth 1 \
     -type d \
-    -mtime +$RETENTION_DAYS \
-    -exec rm -rf {} +
-fi
+    -mtime +"$RETENTION_DAYS" \
+    -exec rm -rf {} + >> "$LOG_FILE" 2>&1
+
+  echo "$(ts) $label deleted count=$count dir=$target_dir" >> "$LOG_FILE"
+}
+
+cleanup_dir "$ERROR_DIR" "error"
+cleanup_dir "$ARCHIVE_DIR" "archive"
+
+echo "$(ts) cleanup completed" >> "$LOG_FILE"

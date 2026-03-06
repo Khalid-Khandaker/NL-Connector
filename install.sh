@@ -21,6 +21,9 @@ SELECTOR_NAME="selector"
 SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
 SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
 
+CONTROL_API_NAME="connector-control-api"
+CONTROL_API_SERVICE="/etc/systemd/system/${CONTROL_API_NAME}.service"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 need_root() {
@@ -40,6 +43,7 @@ check_required_files() {
   [ -f "./systemd/selector.service" ] || die "Missing ./systemd/selector.service"
   [ -f "./systemd/selector.timer" ] || die "Missing ./systemd/selector.timer"
   [ -f "./app/control_api.py" ] || die "Missing ./app/control_api.py"
+  [ -f "./systemd/connector-control-api.service" ] || die "Missing ./systemd/connector-control-api.service"
 }
 
 preflight_checks() {
@@ -100,8 +104,16 @@ create_dirs() {
   echo "Creating directories..."
   mkdir -p "$APP_DIR" "$CFG_DIR" "$BASE/staging" "$BASE/archive" "$BASE/error" "$LOG_DIR" "$(dirname "$MOUNT_POINT")"
 
+  touch "$LOG_DIR/cleanup.log"
+
   chown -R nlconnector:nlconnector "$APP_DIR" "$BASE/staging" "$BASE/archive" "$BASE/error"
   chown -R nlconnector:nlconnector "$LOG_DIR"
+
+  chown nlconnector:nlconnector "$LOG_DIR/cleanup.log"
+  chmod 640 "$LOG_DIR/cleanup.log"
+
+  chmod 755 "$LOG_DIR"
+
   chmod 755 "$BASE" "$APP_DIR" "$CFG_DIR"
 }
 
@@ -140,7 +152,7 @@ setup_venv() {
   if [ -f "$APP_DIR/requirements.txt" ]; then
     sudo -u nlconnector "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
   else
-    sudo -u nlconnector "$VENV/bin/pip" install supabase python-dotenv pyodbc
+    sudo -u nlconnector "$VENV/bin/pip" install supabase python-dotenv pyodbc flask
   fi
 }
 
@@ -181,6 +193,7 @@ install_systemd_units() {
   install -m 644 ./systemd/nl-connector.timer "$CONNECTOR_TIMER"
   install -m 644 ./systemd/selector.service "$SELECTOR_SERVICE"
   install -m 644 ./systemd/selector.timer "$SELECTOR_TIMER"
+  install -m 644 ./systemd/connector-control-api.service "$CONTROL_API_SERVICE"
 
   systemctl daemon-reload
   systemctl enable --now "${CONNECTOR_NAME}.timer"
