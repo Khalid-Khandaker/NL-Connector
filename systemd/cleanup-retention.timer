@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NiceLabel Cleanup Retention Daily
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+RandomizedDelaySec=30
+Unit=cleanup-retention.service
+
+[Install]
+WantedBy=timers.target

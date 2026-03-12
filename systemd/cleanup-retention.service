@@ -1,0 +1,9 @@
+[Unit]
+Description=NiceLabel Cleanup Retention
+After=network.target
+
+[Service]
+Type=oneshot
+User=nlconnector
+WorkingDirectory=/opt/nl-connector/app
+ExecStart=/opt/nl-connector/app/cleanup_retention.sh

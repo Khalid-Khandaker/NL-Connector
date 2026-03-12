@@ -21,6 +21,10 @@ SELECTOR_NAME="selector"
 SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
 SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
 
+CLEANUP_NAME="cleanup-retention"
+CLEANUP_SERVICE="/etc/systemd/system/${CLEANUP_NAME}.service"
+CLEANUP_TIMER="/etc/systemd/system/${CLEANUP_NAME}.timer"
+
 CONTROL_API_NAME="connector-control-api"
 CONTROL_API_SERVICE="/etc/systemd/system/${CONTROL_API_NAME}.service"
 
@@ -42,8 +46,11 @@ check_required_files() {
   [ -f "./systemd/nl-connector.timer" ] || die "Missing ./systemd/nl-connector.timer"
   [ -f "./systemd/selector.service" ] || die "Missing ./systemd/selector.service"
   [ -f "./systemd/selector.timer" ] || die "Missing ./systemd/selector.timer"
+  [ -f "./systemd/cleanup-retention.service" ] || die "Missing ./systemd/cleanup-retention.service"
+  [ -f "./systemd/cleanup-retention.timer" ] || die "Missing ./systemd/cleanup-retention.timer"
   [ -f "./app/control_api.py" ] || die "Missing ./app/control_api.py"
   [ -f "./systemd/connector-control-api.service" ] || die "Missing ./systemd/connector-control-api.service"
+  [ -f "./app/apply_schedule.sh" ] || die "Missing ./app/apply_schedule.sh"
 }
 
 preflight_checks() {
@@ -126,6 +133,9 @@ install_app_files() {
   install -m 755 ./app/control_api.py "$APP_DIR/control_api.py"
   chown nlconnector:nlconnector "$APP_DIR/control_api.py" || true
 
+  install -m 755 ./app/apply_schedule.sh "$APP_DIR/apply_schedule.sh"
+  chown nlconnector:nlconnector "$APP_DIR/apply_schedule.sh" || true
+
   if [ -f "./app/requirements.txt" ]; then
     install -m 644 ./app/requirements.txt "$APP_DIR/requirements.txt"
   fi
@@ -193,36 +203,36 @@ install_systemd_units() {
   install -m 644 ./systemd/nl-connector.timer "$CONNECTOR_TIMER"
   install -m 644 ./systemd/selector.service "$SELECTOR_SERVICE"
   install -m 644 ./systemd/selector.timer "$SELECTOR_TIMER"
+  install -m 644 ./systemd/cleanup-retention.service "$CLEANUP_SERVICE"
+  install -m 644 ./systemd/cleanup-retention.timer "$CLEANUP_TIMER"
   install -m 644 ./systemd/connector-control-api.service "$CONTROL_API_SERVICE"
+
+  echo "Removing old cron retention job if present..."
+  rm -f /etc/cron.daily/nl-connector-retention
 
   systemctl daemon-reload
   systemctl enable --now "${CONNECTOR_NAME}.timer"
   systemctl enable --now "${SELECTOR_NAME}.timer"
-}
-
-setup_retention_cron() {
-  echo "Setting up daily retention cleanup..."
-  cat > /etc/cron.daily/nl-connector-retention <<CRON
-#!/usr/bin/env bash
-/opt/nl-connector/app/cleanup_retention.sh
-CRON
-  chmod +x /etc/cron.daily/nl-connector-retention
+  systemctl enable --now "${CLEANUP_NAME}.timer"
 }
 
 final_checks() {
   echo "Final checks..."
   systemctl status "${CONNECTOR_NAME}.timer" --no-pager || true
   systemctl status "${SELECTOR_NAME}.timer" --no-pager || true
+  systemctl status "${CLEANUP_NAME}.timer" --no-pager || true
 
   echo "Verifying venv + deps..."
   sudo -u nlconnector "$VENV/bin/python" -c "import supabase, dotenv, pyodbc, flask; print('deps OK')" || true
 
   echo "DONE."
   echo "Logs: $LOG_DIR/connector.log"
+  echo "Cleanup log: $LOG_DIR/cleanup.log"
   echo "Mount: $MOUNT_POINT"
   echo "Tip: run a manual test with:"
   echo "  sudo systemctl start ${SELECTOR_NAME}.service"
   echo "  sudo systemctl start ${CONNECTOR_NAME}.service"
+  echo "  sudo systemctl start ${CLEANUP_NAME}.service"
 }
 
 main() {
@@ -237,7 +247,8 @@ main() {
   setup_venv
   setup_mount
   install_systemd_units
-  setup_retention_cron
+  echo "Applying schedules from config..."
+  "$APP_DIR/apply_schedule.sh"
   final_checks
 }
 

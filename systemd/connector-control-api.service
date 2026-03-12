@@ -1,13 +1,14 @@
 [Unit]
-Description=NiceLabel File Drop Connector
-After=network-online.target
-Wants=network-online.target
+Description=NiceLabel Connector Control API
+After=network.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=nlconnector
-ExecStart=/opt/nl-connector/app/.venv/bin/python /opt/nl-connector/app/connector.py
+WorkingDirectory=/opt/nl-connector/app
+ExecStart=/opt/nl-connector/app/.venv/bin/python /opt/nl-connector/app/control_api.py
+Restart=always
+RestartSec=5
 
-# Logs are handled by JSON log file, but journal still capture failures.
-StandardOutput=journal
-StandardError=journal
+[Install]
+WantedBy=multi-user.target

@@ -1,21 +1,19 @@
 import os
 import re
 import json
-from datetime import datetime, date
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
-
-import pyodbc
+import requests
 from dotenv import dotenv_values
 from supabase import create_client
-
-import time 
-
+import time
 
 ENV_PATH = "/opt/nl-connector/config/.env"
 SERVICE_NAME = "selector"
 LOG_PATH_DEFAULT = "/var/log/nl-connector/connector.log"
 API1_FILE_NAME = "selector.py"
 LOCK_PATH = "/var/lock/nl-selector.lock"
+ALLOWED_CODELISTE = {132072, 151637, 184573}
 
 def acquire_lock() -> bool:
     os.makedirs("/var/lock", exist_ok=True)
@@ -27,23 +25,28 @@ def acquire_lock() -> bool:
     except FileExistsError:
         return False
 
+
 def release_lock():
     try:
         os.remove(LOCK_PATH)
     except FileNotFoundError:
         pass
 
+
 def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
-    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
 
-
-def log_event(*, level: str, event: str, message: str, batch_id: str = "", file_name: str = API1_FILE_NAME, log_path: str = LOG_PATH_DEFAULT, run_id: str = "",) -> None:
-    """
-    Append one JSON log line to connector.log
-    Required fields per spec:
-      timestamp, level, event, batch_id, file_name, message
-    """
+def log_event(
+    *,
+    level: str,
+    event: str,
+    message: str,
+    batch_id: str = "",
+    file_name: str = API1_FILE_NAME,
+    log_path: str = LOG_PATH_DEFAULT,
+    run_id: str = "",
+) -> None:
     entry = {
         "timestamp": utc_iso(),
         "service": SERVICE_NAME,
@@ -61,12 +64,10 @@ def log_event(*, level: str, event: str, message: str, batch_id: str = "", file_
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
-
         pass
 
 
 def detect_trigger() -> str:
-
     return "systemd" if os.getenv("INVOCATION_ID") else "manual"
 
 
@@ -87,40 +88,77 @@ def clean_product_name(name: str) -> str:
     return name
 
 
-def fetch_top10(conn) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("SET NOCOUNT ON;")
-    cur.execute("EXEC dbo.NiceLabel_GetTop10RecipesToPrint")
+def get_api_config(env: dict) -> tuple[str, str, int]:
+    base_url = (env.get("CALCMENU_API_BASE_URL") or os.getenv("CALCMENU_API_BASE_URL") or "").strip().rstrip("/")
+    api_key = (env.get("CALCMENU_API_KEY") or os.getenv("CALCMENU_API_KEY") or "").strip()
 
-    cols = [c[0] for c in cur.description]
-    out = []
-    while True:
-        row = cur.fetchone()
-        if not row:
-            break
-        out.append({cols[i]: row[i] for i in range(len(cols))})
-    return out
+    timeout_raw = (env.get("CALCMENU_API_TIMEOUT") or os.getenv("CALCMENU_API_TIMEOUT") or "30").strip()
+    timeout = int(timeout_raw) if timeout_raw else 30
+
+    if not base_url:
+        raise SystemExit("Missing CALCMENU_API_BASE_URL in /opt/nl-connector/config/.env")
+
+    if not api_key:
+        raise SystemExit("Missing CALCMENU_API_KEY in /opt/nl-connector/config/.env")
+
+    return base_url, api_key, timeout
 
 
-def fetch_recipe_details(conn, code_liste: int, code_trans: int, code_nutrient_set: int) -> dict:
-    cur = conn.cursor()
-    cur.execute("SET NOCOUNT ON;")
-    cur.execute("EXEC dbo.NiceLabel_GetRecipeDetails ?, ?, ?", (code_liste, code_trans, code_nutrient_set))
+def fetch_recipes_ready_for_print(base_url: str, api_key: str, timeout: int) -> list[dict]:
+    url = f"{base_url}/recipes/ready-for-print"
 
-    parts = []
-    while True:
-        r = cur.fetchone()
-        if not r:
-            break
-        if r[0] is not None:
-            parts.append(str(r[0]))
+    resp = requests.get(
+        url,
+        headers={"X-API-Key": api_key},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
 
-    raw = "".join(parts).strip()
-    if not raw:
-        raise RuntimeError("No JSON returned from NiceLabel_GetRecipeDetails.")
-    if not raw.endswith("}"):
-        raise RuntimeError(f"JSON appears incomplete (len={len(raw)}). Tail: {raw[-120:]}")
-    return json.loads(raw)
+    payload = resp.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"API returned ok=false for /recipes/top10: {payload}")
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise RuntimeError(f"Unexpected /recipes/top10 response shape: {payload}")
+
+    return data
+
+
+def fetch_recipe_label_data(
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    code_liste: int,
+    code_trans: int,
+    code_nutrient_set: int,
+) -> dict:
+    url = f"{base_url}/recipes/label-data"
+
+    resp = requests.get(
+        url,
+        headers={"X-API-Key": api_key},
+        params={
+            "code_liste": int(code_liste),
+            "code_trans": int(code_trans),
+            "code_nutrient_set": int(code_nutrient_set),
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+
+    payload = resp.json()
+    if not payload.get("ok"):
+        raise RuntimeError(
+            f"API returned ok=false for /recipes/details "
+            f"(code_liste={code_liste}, code_trans={code_trans}, code_nutrient_set={code_nutrient_set}): {payload}"
+        )
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected /recipes/details response shape: {payload}")
+
+    return data
 
 
 def pick(item: dict, *keys, default=None):
@@ -131,71 +169,61 @@ def pick(item: dict, *keys, default=None):
     return default
 
 
-def join_allergens_short(details: dict) -> str:
-    content = details.get("content") or {}
+def join_allergens_short(recipe_data: dict) -> str:
+    content = recipe_data.get("content") or {}
     allergens = content.get("allergens") or []
     if isinstance(allergens, list):
-        s = ", ".join(str(a).strip() for a in allergens if str(a).strip())
-        return s
+        return ", ".join(str(a).strip() for a in allergens if str(a).strip())
     return str(allergens).strip()
 
 
-def join_ingredients_text(details: dict) -> str:
-    content = details.get("content") or {}
-    ingredients = content.get("ingredients") or []
-    if not isinstance(ingredients, list) or not ingredients:
+def join_ingredients_text(recipe_data: dict) -> str:
+    """
+    Supports both:
+    1) New SP format: content.ingredients is a plain text string
+    2) Old SP format: content.ingredients is a list of ingredient objects
+    """
+    content = recipe_data.get("content") or {}
+    ingredients = content.get("ingredients")
+
+    if ingredients is None:
         return ""
 
-    parts = []
-    for ing in ingredients:
-        seq = ing.get("sequence", "")
-        name = (ing.get("name") or "").strip()
-        amount = (ing.get("amount") or "").strip()
-        unit = (ing.get("unit") or "").strip()
+    # New format from updated SP
+    if isinstance(ingredients, str):
+        return ingredients.strip()
 
-        qty = " ".join(x for x in [amount, unit] if x).strip()
-        if qty:
-            parts.append(f"{seq}) {name} - {qty}".strip())
-        else:
-            parts.append(f"{seq}) {name}".strip())
+    # Backward-compatible with old list format
+    if isinstance(ingredients, list):
+        if not ingredients:
+            return ""
 
-    return "; ".join(p for p in parts if p)
+        parts = []
+        for ing in ingredients:
+            if not isinstance(ing, dict):
+                continue
+
+            seq = ing.get("sequence", "")
+            name = (ing.get("name") or "").strip()
+            amount = str(ing.get("amount") or "").strip()
+            unit = (ing.get("unit") or "").strip()
+
+            qty = " ".join(x for x in [amount, unit] if x).strip()
+            if qty:
+                parts.append(f"{seq}) {name} - {qty}".strip())
+            else:
+                parts.append(f"{seq}) {name}".strip())
+
+        return "; ".join(p for p in parts if p)
+
+    return str(ingredients).strip()
 
 
-def extract_site(details: dict) -> str:
-    content = details.get("content") or {}
+def extract_site(recipe_data: dict) -> str:
+    content = recipe_data.get("content") or {}
     ref = content.get("calcmenu_reference") or {}
     site = ref.get("code_site")
     return "" if site is None else str(site)
-
-
-def parse_batch_date_from_top10(item: dict) -> str:
-    v = pick(item, "StartDate", "start_date", "startDate", default=None)
-    if v is None:
-        v = pick(item, "CreatedAt", "created_at", "createdAt", default=None)
-
-    if v is None:
-        return datetime.now().strftime("%Y%m%d")
-
-    if isinstance(v, datetime):
-        return v.strftime("%Y%m%d")
-    if isinstance(v, date):
-        return v.strftime("%Y%m%d")
-
-    s = str(v).strip()
-    if not s:
-        return datetime.now().strftime("%Y%m%d")
-
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%d/%m/%Y", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(s[:10], fmt).strftime("%Y%m%d")
-        except Exception:
-            pass
-
-    try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%Y%m%d")
-    except Exception:
-        return datetime.now().strftime("%Y%m%d")
 
 
 def site_code_from_site(site: str) -> str:
@@ -215,6 +243,7 @@ def site_code_from_site(site: str) -> str:
         return s[:3]
     return s.ljust(3, "X")
 
+
 def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
     like_pattern = f"{prefix}%"
     resp = sb.table(table).select("batch_id").like("batch_id", like_pattern).limit(2000).execute()
@@ -231,10 +260,11 @@ def next_run_seq_for_prefix(sb, table: str, prefix: str) -> int:
                 pass
     return max_seq + 1
 
+
 def main():
     env = dotenv_values(ENV_PATH)
-    
-    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     trigger = detect_trigger()
     log_event(
@@ -244,26 +274,19 @@ def main():
         run_id=run_id,
         batch_id="",
     )
-    
+
     if not acquire_lock():
-        log_event(level="INFO", event="RUN_SKIPPED", run_id=run_id, message="selector lock exists; another run active")
+        log_event(
+            level="INFO",
+            event="RUN_SKIPPED",
+            run_id=run_id,
+            message="selector lock exists; another run active",
+        )
         return 0
+
     try:
         try:
-            server = env.get("SQL_SERVER", "192.168.1.28,1510")
-            db = env.get("SQL_DATABASE", "CMC_2025")
-            user = env.get("SQL_USER", "egs.khalid")
-            pwd = env.get("SQL_PASSWORD") or os.environ.get("SQL_PASSWORD")
-
-            if not pwd:
-                raise SystemExit("Missing SQL_PASSWORD in /opt/nl-connector/config/.env (or export it).")
-
-            conn_str = (
-                "DRIVER={ODBC Driver 18 for SQL Server};"
-                f"SERVER={server};DATABASE={db};"
-                f"UID={user};PWD={pwd};"
-                "Encrypt=yes;TrustServerCertificate=yes;"
-            )
+            api_base_url, api_key, api_timeout = get_api_config(env)
 
             sb_url = env.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
             sb_key = env.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -277,192 +300,189 @@ def main():
             status_to_set = env.get("STATUS_TO_SET", "READY")
             qty_default = int(env.get("QTY_DEFAULT", "1"))
             language_override = (env.get("LANGUAGE_DEFAULT", "") or "").strip()
-
             site_name_for_code = (env.get("SITE_NAME_FOR_CODE", "") or "").strip()
 
             inserted = 0
             failed = 0
 
-            with pyodbc.connect(conn_str, timeout=30) as conn:
-                conn.setdecoding(pyodbc.SQL_CHAR, encoding="utf-8")
-                conn.setdecoding(pyodbc.SQL_WCHAR, encoding="utf-8")
-                conn.setencoding(encoding="utf-8")
+            t0 = time.time()
+            try:
+                recipes_to_print = fetch_recipes_ready_for_print(api_base_url, api_key, api_timeout)
 
-                t0 = time.time()
+                log_event(
+                    level="INFO",
+                    event="RECIPES_FETCH_OK",
+                    run_id=run_id,
+                    message=f"endpoint=/recipes/ready-for-print recipes={len(recipes_to_print)} duration_ms={int((time.time()-t0)*1000)}",
+                    batch_id="",
+                )
+
+            except Exception as e:
+                log_event(
+                    level="ERROR",
+                    event="RECIPES_FETCH_FAILED",
+                    run_id=run_id,
+                    message=f"endpoint=/recipes/ready-for-print err={type(e).__name__}:{e}",
+                    batch_id="",
+                )
+                raise
+
+            candidates: List[Dict[str, Any]] = []
+
+            for item in recipes_to_print:
+                code_liste = pick(item, "CodeListe", "code")
+
+                if code_liste not in ALLOWED_CODELISTE:
+                    continue
+
+                code_trans = pick(item, "CodeTrans", default=7)
+                code_nutrient_set = pick(item, "CodeNutrientSet", default=0)
+                template_name = pick(item, "TemplateName", "template", default="RestaurantLabel_1")
+
+                if code_liste is None:
+                    raise RuntimeError(f"Top10 row missing CodeListe/code. Row={item}")
+
+                code_liste = int(code_liste)
+                code_trans = int(code_trans or 7)
+                code_nutrient_set = int(code_nutrient_set or 0)
+                template_name = str(template_name).strip()
+
+                batch_date = datetime.now().strftime("%Y%m%d")
+
                 try:
-                    top10 = fetch_top10(conn)
+                    recipe_data = fetch_recipe_label_data(
+                        api_base_url,
+                        api_key,
+                        api_timeout,
+                        code_liste,
+                        code_trans,
+                        code_nutrient_set,
+                    )
+                    content = recipe_data.get("content") or {}
 
-                    log_event(
-                        level="INFO",
-                        event="CM_FETCH_OK",
-                        run_id=run_id,
-                        message=f"sp=NiceLabel_GetTop10RecipesToPrint rows={len(top10)} duration_ms={int((time.time()-t0)*1000)}",
-                        batch_id="",
+                    product_name = (content.get("title") or recipe_data.get("title") or "").strip()
+                    product_name = clean_product_name(product_name)
+
+                    allergens_short = join_allergens_short(recipe_data)
+                    if not allergens_short:
+                        allergens_short = "None"
+
+                    ingredients_text = join_ingredients_text(recipe_data)
+
+                    site = extract_site(recipe_data) or "1"
+                    language = language_override if language_override else str(code_trans)
+
+                    qty = qty_default
+
+                    candidates.append(
+                        {
+                            "_batch_date": batch_date,
+                            "site": site,
+                            "template_name": template_name,
+                            "language": language,
+                            "product_name": product_name,
+                            "allergens_short": allergens_short,
+                            "ingredients": ingredients_text,
+                            "status": status_to_set,
+                            "qty": qty,
+                            "error_reason": None,
+                        }
                     )
 
-
-                except Exception as e:
+                except json.JSONDecodeError as e:
+                    failed += 1
                     log_event(
                         level="ERROR",
-                        event="CM_FETCH_FAILED",
+                        event="RECIPE_PROCESS_FAILED",
                         run_id=run_id,
-                        message=f"sp=NiceLabel_GetTop10RecipesToPrint err={type(e).__name__}:{e}",
+                        message=f"code_liste={code_liste} err=JSONDecodeError:{e}",
                         batch_id="",
                     )
-                    raise
+                    print(f"Failed CodeListe={code_liste}: {e}")
 
-                candidates: List[Dict[str, Any]] = []
+                except Exception as e:
+                    failed += 1
+                    log_event(
+                        level="ERROR",
+                        event="RECIPE_PROCESS_FAILED",
+                        run_id=run_id,
+                        message=f"code_liste={code_liste} err={type(e).__name__}:{e}",
+                        batch_id="",
+                    )
+                    print(f"Failed CodeListe={code_liste}: {e}")
 
-                for item in top10:
-                    code_liste = pick(item, "CodeListe", "code")
-                    code_trans = pick(item, "CodeTrans", default=1)
-                    code_nutrient_set = pick(item, "CodeNutrientSet", default=0)
-                    template_name = pick(item, "TemplateName", "template", default="RestaurantLabel_1")
-                    qty_from_item = pick(item, "Qty", "Quantity", "qty", "quantity", "QTY", default=None)
+            if not candidates:
+                print("No candidates to insert. Exiting.")
 
-                    if code_liste is None:
-                        raise RuntimeError(f"Top10 row missing CodeListe/code. Row={item}")
+                log_event(
+                    level="INFO",
+                    event="SYNC_COMPLETED",
+                    run_id=run_id,
+                    message=f"inserted={inserted} failed={failed} batches=0 trigger={trigger}",
+                    batch_id="",
+                )
 
-                    code_liste = int(code_liste)
-                    code_trans = int(code_trans or 1)
-                    code_nutrient_set = int(code_nutrient_set or 0)
-                    template_name = str(template_name)
+                return 0 if failed == 0 else 1
 
-                    batch_date = parse_batch_date_from_top10(item)
+            groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+            for r in candidates:
+                key = (r["_batch_date"], r["site"])
+                groups.setdefault(key, []).append(r)
 
-                    try:
-                        details = fetch_recipe_details(conn, code_liste, code_trans, code_nutrient_set)
-                        content = details.get("content") or {}
+            batches = len(groups)
 
-                        product_name = (content.get("title") or details.get("title") or "").strip()
-                        product_name = clean_product_name(product_name)
+            for (batch_date, site), rows in groups.items():
+                row_count_4 = f"{len(rows):04d}"
 
-                        description = (content.get("description") or "").strip()
+                site_code_source = site_name_for_code if site_name_for_code else site
+                site_code = site_code_from_site(site_code_source)
 
-                        allergens_short = join_allergens_short(details)
-                        if not allergens_short:
-                            allergens_short = "None"
+                prefix = f"{batch_date}-{row_count_4}-{site_code}-"
+                seq = next_run_seq_for_prefix(sb, sb_table, prefix)
 
-                        ingredients_text = join_ingredients_text(details)
+                batch_id = f"{batch_date}-{row_count_4}-{site_code}-{seq:03d}"
 
-                        site = extract_site(details) or "1"
-                        language = language_override if language_override else str(code_trans)
+                payload = []
+                for r in rows:
+                    rr = dict(r)
+                    rr.pop("_batch_date", None)
+                    rr["batch_id"] = batch_id
+                    payload.append(rr)
 
-                        try:
-                            qty = int(qty_from_item) if qty_from_item is not None and str(qty_from_item).strip() else qty_default
-                        except Exception:
-                            qty = qty_default
+                log_event(
+                    level="INFO",
+                    event="BATCH_CREATED",
+                    run_id=run_id,
+                    message=f"rows={len(payload)} site={site}",
+                    batch_id=batch_id,
+                )
 
-                        candidates.append(
-                            {
-                                "_batch_date": batch_date,
-                                "site": site,
-                                "template_name": template_name,
-                                "language": language,
-                                "product_name": product_name,
-                                "allergens_short": allergens_short,
-                                "description": description,
-                                "ingredients": ingredients_text,
-                                "status": status_to_set,
-                                "qty": qty,
-                                "error_reason": None,
-                            }
-                        )
-
-                    except json.JSONDecodeError as e:
-                        failed += 1
-                        log_event(
-                            level="ERROR",
-                            event="DATA_PARSE_FAILED",
-                            run_id=run_id,
-                            message=f"code_liste={code_liste} err=JSONDecodeError:{e}",
-                            batch_id="",
-                        )
-                        print(f"Failed CodeListe={code_liste}: {e}")
-
-                    except Exception as e:
-                        failed += 1
-                        log_event(
-                            level="ERROR",
-                            event="DATA_PARSE_FAILED",
-                            run_id=run_id,
-                            message=f"code_liste={code_liste} err={type(e).__name__}:{e}",
-                            batch_id="",
-                        )
-                        print(f"Failed CodeListe={code_liste}: {e}")
-
-                if not candidates:
-                    print("No candidates to insert. Exiting.")
+                try:
+                    sb.table(sb_table).insert(payload).execute()
+                    inserted += len(payload)
 
                     log_event(
                         level="INFO",
-                        event="SYNC_COMPLETED",
-                        run_id=run_id,
-                        message=f"inserted={inserted} failed={failed} batches=0 trigger={trigger}",
-                        batch_id="",
-                    )
-
-                    return 0 if failed == 0 else 1
-
-                groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-                for r in candidates:
-                    key = (r["_batch_date"], r["site"])
-                    groups.setdefault(key, []).append(r)
-
-                batches = len(groups)
-
-                for (batch_date, site), rows in groups.items():
-                    row_count_4 = f"{len(rows):04d}"
-
-                    site_code_source = site_name_for_code if site_name_for_code else site
-                    site_code = site_code_from_site(site_code_source)
-
-                    prefix = f"{batch_date}-{row_count_4}-{site_code}-"
-                    seq = next_run_seq_for_prefix(sb, sb_table, prefix)
-
-                    batch_id = f"{batch_date}-{row_count_4}-{site_code}-{seq:03d}"
-
-                    payload = []
-                    for r in rows:
-                        rr = dict(r)
-                        rr.pop("_batch_date", None)
-                        rr["batch_id"] = batch_id
-                        payload.append(rr)
-
-                    log_event(
-                        level="INFO",
-                        event="BATCH_CREATED",
+                        event="SUPABASE_INSERT_OK",
                         run_id=run_id,
                         message=f"rows={len(payload)} site={site}",
                         batch_id=batch_id,
                     )
 
-                    try:
-                        sb.table(sb_table).insert(payload).execute()
-                        inserted += len(payload)
+                    print(f"Inserted batch_id={batch_id} site={site} rows={len(payload)}")
 
-                        log_event(
-                            level="INFO",
-                            event="SUPABASE_INSERT_OK",
-                            run_id=run_id,
-                            message=f"rows={len(payload)} site={site}",
-                            batch_id=batch_id,
-                        )
+                except Exception as e:
+                    failed += len(payload)
 
-                        print(f"Inserted batch_id={batch_id} site={site} rows={len(payload)}")
+                    log_event(
+                        level="ERROR",
+                        event="SUPABASE_INSERT_FAILED",
+                        run_id=run_id,
+                        message=f"rows={len(payload)} site={site} err={type(e).__name__}:{e}",
+                        batch_id=batch_id,
+                    )
 
-                    except Exception as e:
-                        failed += len(payload)
-
-                        log_event(
-                            level="ERROR",
-                            event="SUPABASE_INSERT_FAILED",
-                            run_id=run_id,
-                            message=f"rows={len(payload)} site={site} err={type(e).__name__}:{e}",
-                            batch_id=batch_id,
-                        )
-
-                        print(f"FAILED inserting batch_id={batch_id} site={site} rows={len(payload)} err={e}")
+                    print(f"FAILED inserting batch_id={batch_id} site={site} rows={len(payload)} err={e}")
 
             print(f"\nDONE inserted={inserted} failed={failed} table={sb_table}")
 
@@ -488,7 +508,5 @@ def main():
     finally:
         release_lock()
 
-
 if __name__ == "__main__":
     raise SystemExit(main())
-

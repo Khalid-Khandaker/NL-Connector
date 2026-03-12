@@ -1,18 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Default behavior:
-# - remove connector files/folders
-# - remove systemd units
-# - remove cron entry
-# - unmount SMB share
-# - remove connector fstab entry
-# - remove mount folders if empty
-# - remove nlconnector service user
-#
-# This script does NOT remove Ubuntu packages, Python packages,
-# SQL drivers, cifs-utils, unixodbc, or Microsoft repo files.
-
 REMOVE_USER="${REMOVE_USER:-1}"
 
 MOUNT_POINT="/mnt/nicelabel/in"

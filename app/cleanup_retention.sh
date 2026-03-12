@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+CFG="/opt/nl-connector/config/.env"
+
 RETENTION_DAYS=30
+
+if [ -f "$CFG" ]; then
+  set -a
+  . "$CFG"
+  set +a
+  RETENTION_DAYS="${CLEANUP_RETENTION_DAYS:-30}"
+fi
 
 ERROR_DIR="/opt/nl-connector/error"
 ARCHIVE_DIR="/opt/nl-connector/archive"
@@ -24,6 +33,7 @@ cleanup_dir() {
     return 0
   fi
 
+  # count candidates first (folders older than retention)
   local count
   count=$(find "$target_dir" -mindepth 1 -maxdepth 1 -type d -mtime +"$RETENTION_DAYS" | wc -l | tr -d ' ')
 
@@ -34,6 +44,7 @@ cleanup_dir() {
 
   echo "$(ts) $label deleting count=$count dir=$target_dir" >> "$LOG_FILE"
 
+  # delete
   find "$target_dir" \
     -mindepth 1 -maxdepth 1 \
     -type d \

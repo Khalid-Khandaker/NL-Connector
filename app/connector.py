@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 import re
+from html import unescape
 
 LOCK_PATH = "/var/lock/nl-connector.lock"
 BASE = "/opt/nl-connector"
@@ -44,54 +45,242 @@ def release_global_lock():
     except FileNotFoundError:
         pass
 
+# def _clean_single_ingredient(text: str) -> str:
+#     if not text:
+#         return ""
+#     text = text.strip()
+#     text = re.sub(r"^\d+\)\s*", "", text)
+#     if " - " in text:
+#         text = text.split(" - ", 1)[0]
+#     text = re.sub(r"\[.*?\]", "", text)
+#     text = re.sub(r"\(.*?\)", "", text)
+#     if "-" in text:
+#         parts = text.split("-")
+#         text = parts[0]
+#     text = re.sub(r"\b\d+%\b", "", text)
+#     text = re.sub(r"\s+", " ", text).strip()
+
+#     return text
+
+
+def _split_top_level(text: str):
+    """
+    Split by comma/semicolon only when not inside parentheses.
+    Example:
+    'A, B (x, y), C' -> ['A', 'B (x, y)', 'C']
+    """
+    if not text:
+        return []
+
+    parts = []
+    buf = []
+    depth = 0
+
+    for ch in text:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            if depth > 0:
+                depth -= 1
+            buf.append(ch)
+        elif ch in [",", ";"] and depth == 0:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+        else:
+            buf.append(ch)
+
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+
+    return parts
+
+
+def _strip_html(text: str) -> str:
+    if not text:
+        return ""
+    text = unescape(str(text))
+    text = re.sub(r"</?b[^>]*>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    return text
+
+
+def _normalize_spaces(text: str) -> str:
+    text = text.replace('"', " ")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"\s*\(\s*", " (", text)
+    text = re.sub(r"\s*\)\s*", ")", text)
+    return text.strip(" ,;-")
+
+
+def _clean_allergen_blob(text: str) -> str:
+    """
+    For rows like:
+    EGS CP Product (Egg, Milk, Céréales..., Lait, ...)
+    return only the readable content inside parentheses.
+    """
+    text = _strip_html(text)
+    text = _normalize_spaces(text)
+
+    m = re.search(r"\((.*)\)", text)
+    if not m:
+        return text
+
+    inner = m.group(1).strip()
+    if not inner:
+        return ""
+
+    items = []
+    seen = set()
+    for part in _split_top_level(inner):
+        p = _normalize_spaces(_strip_html(part))
+        if not p:
+            continue
+        key = p.casefold()
+        if key not in seen:
+            seen.add(key)
+            items.append(p)
+
+    return ", ".join(items)
+
+
+def _prettify_base_name(base: str) -> str:
+    """
+    Convert ugly catalog names into readable ingredient names
+    while keeping French.
+    """
+    if not base:
+        return ""
+
+    s = _strip_html(base).upper().strip()
+
+    # remove common leading numbering like "1) "
+    s = re.sub(r"^\d+\)\s*", "", s)
+
+    # targeted cleanup for your current CalcMenu patterns
+    replacements = [
+        (r"^PDT DOUCE ROUGE.*$", "Patate douce rouge"),
+        (r"^AVOCAT DEMI.*$", "Avocat"),
+        (r"^QUINOA BLANC.*$", "Quinoa blanc"),
+        (r"^ORANGE A DESSERT.*$", "Orange"),
+        (r"^OEUF DUR ECALE.*$", "Œufs"),
+        (r"^CHOU DE MAI.*$", "Chou de Mai"),
+        (r"^GRAINE DE TOURNESOL.*$", "Graine de tournesol"),
+        (r"^HUILE TOURNESOL/OLIVE.*$", "Huile tournesol/olive"),
+        (r"^MIEL DU LUXEMBOURG.*$", "Miel"),
+        (r"^FOND BRUN.*$", "Fond brun"),
+        (r"^CIBOULETTE.*$", "Ciboulette"),
+        (r"^CUMIN MOULU.*$", "Cumin moulu"),
+        (r"^SEL FIN IODE.*$", "Sel fin iodé"),
+        (r"^POIVRE NOIR MOULU.*$", "Poivre noir moulu"),
+        (r"^FROM\.MOZZARELLA.*$", "Mozzarella"),
+        (r"^FOND PIZZA.*$", "Fond pizza"),
+        (r"^CHAMPIGNON PARIS.*$", "Champignon de Paris"),
+        (r"^JAMBON CUIT.*$", "Jambon cuit"),
+        (r"^MAIS EN GRAIN.*$", "Maïs en grain"),
+        (r"^POIVRON TRICOLORE.*$", "Poivron tricolore"),
+        (r"^SALAMI ARDENNE.*$", "Salami ardenne"),
+        (r"^OLIVE NOIRE.*$", "Olive noire"),
+        (r"^TOMATE CONCASSEE.*$", "Tomate concassée"),
+        (r"^ORIGAN PIZZA.*$", "Origan"),
+        (r"^OIGNON GROS.*$", "Oignon"),
+        (r"^CAROTTE GEANTE.*$", "Carotte"),
+        (r"^AIL EPLUCHE.*$", "Ail épluché"),
+        (r"^EAU RECETTE.*$", "Eau"),
+        (r"^BASILIC.*$", "Basilic"),
+    ]
+
+    for pattern, value in replacements:
+        if re.match(pattern, s):
+            return value
+
+    # generic fallback:
+    # remove trailing supplier/package chunks after first hyphen
+    s = re.split(r"\s*-\s*", s, maxsplit=1)[0]
+
+    # remove some noisy pack/unit tails still left
+    s = re.sub(r"\b\d+(?:[.,]\d+)?\s*(KG|G|GR|L|ML|U)\b", "", s)
+    s = re.sub(r"\b\d+[Xx]\d+(?:[.,]\d+)?\b", "", s)
+    s = re.sub(r"\bCAL\s*\d+/\d+\b", "", s)
+
+    s = _normalize_spaces(s)
+
+    if not s:
+        return ""
+
+    return s[:1] + s[1:].lower()
+
+
 def _clean_single_ingredient(text: str) -> str:
     if not text:
         return ""
-    text = text.strip()
-    text = re.sub(r"^\d+\)\s*", "", text)
-    if " - " in text:
-        text = text.split(" - ", 1)[0]
-    text = re.sub(r"\[.*?\]", "", text)
-    text = re.sub(r"\(.*?\)", "", text)
-    if "-" in text:
-        parts = text.split("-")
-        text = parts[0]
-    text = re.sub(r"\b\d+%\b", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
 
-    return text
+    text = _strip_html(text)
+    text = _normalize_spaces(text)
+
+    if not text:
+        return ""
+
+    # Special case: broken allergen rows like row 4 / 5
+    if "product (" in text.lower():
+        return _clean_allergen_blob(text)
+
+    base = text
+    if "(" in text:
+        base = text.split("(", 1)[0].strip()
+
+    clean = _prettify_base_name(base)
+    return _normalize_spaces(clean)
 
 
 def format_ingredients(ingredients):
     """
     Accepts:
     - CalcMenu JSON list
-    - Raw string (like Notepad.txt format)
+    - Raw string (comma/semicolon separated, including nested parentheses)
 
     Returns:
     Clean comma-separated string
     """
-
     if not ingredients:
         return ""
 
+    cleaned = []
+    seen = set()
+
     if isinstance(ingredients, list):
-        cleaned = []
         for item in ingredients:
-            name = item.get("name", "")
-            clean = _clean_single_ingredient(name)
+            if isinstance(item, dict):
+                raw = item.get("name", "")
+            else:
+                raw = str(item)
+
+            clean = _clean_single_ingredient(raw)
             if clean:
-                cleaned.append(clean)
+                key = clean.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    cleaned.append(clean)
+
         return ", ".join(cleaned)
 
-    raw = str(ingredients)
-    parts = raw.split(";")
+    raw = str(ingredients).strip()
 
-    cleaned = []
-    for part in parts:
+    # handle broken "allergen blob" rows directly
+    if "product (" in raw.lower():
+        return _clean_allergen_blob(raw)
+
+    for part in _split_top_level(raw):
         clean = _clean_single_ingredient(part)
         if clean:
-            cleaned.append(clean)
+            key = clean.casefold()
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(clean)
 
     return ", ".join(cleaned)
 
@@ -110,6 +299,21 @@ def log(level, event, batch_id, file_name, message, run_id=""):
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+def clean_product_name(name: str) -> str:
+    """
+    Clean product_name coming from CalcMenu.
+    Example:
+    '"EGS CP Cookies And Cream Mousse' -> 'Cookies And Cream Mousse'
+    """
+    if not name:
+        return ""
+
+    name = str(name)
+    name = name.replace('"', '').strip()
+    name = re.sub(r'^EGS\s*CP\s*', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    return name
 
 def validate_row(row):
     for key, maxlen, typ in REQUIRED:
@@ -165,11 +369,57 @@ def make_filename(site, batch_id):
 
     return f"{site_part}_{date_part}.csv"
 
+def make_output_pdf_name(site, batch_id, template_name):
+    """
+    Example:
+    site=1
+    batch_id=20260309-0010-1-004
+    template_name=RestaurantLabel_1.nlbl
+
+    Returns:
+    1_20260309_RestaurantLabel_1.pdf
+    """
+    date_part = str(batch_id)[:8]
+    if not date_part.isdigit():
+        date_part = datetime.now().strftime("%Y%m%d")
+
+    site_part = str(site).strip()
+    if not site_part:
+        site_part = "SITE"
+
+    template_part = str(template_name or "").strip()
+
+    # keep only file name, remove folders
+    template_part = os.path.basename(template_part.replace("\\", "/"))
+
+    # remove extension
+    if template_part.lower().endswith(".nlbl"):
+        template_part = template_part[:-5]
+
+    # make safe for file name
+    template_part = _safe_name(template_part, "template", 80)
+
+    return f"{site_part}_{date_part}_{template_part}.pdf"
+
+def sort_rows_for_nicelabel(rows):
+    """
+    Group rows by template so NiceLabel processes same-template labels
+    consecutively and can append them into the same PDF.
+    """
+    def sort_key(r):
+        template_name = str(r.get("template_name") or "").casefold()
+        product_name = str(r.get("product_name") or "").casefold()
+        row_id = str(r.get("id") or "")
+        return (template_name, product_name, row_id)
+
+    return sorted(rows, key=sort_key)
 
 def atomic_write_csv(file_name, rows, template_base: str, label_base: str):
     os.makedirs(STAGING, exist_ok=True)
     tmp_path = os.path.join(STAGING, file_name + ".tmp")
     csv_path = os.path.join(STAGING, file_name)
+    
+    rows = sort_rows_for_nicelabel(rows)
 
     output_stem = os.path.splitext(file_name)[0]
 
@@ -179,6 +429,7 @@ def atomic_write_csv(file_name, rows, template_base: str, label_base: str):
 
         for r in rows:
             row_data = {k: r.get(k, "") for k, _, _ in REQUIRED}
+            row_data["product_name"] = clean_product_name(row_data.get("product_name"))
 
             raw_template = str(row_data.get("template_name") or "").strip()
 
@@ -198,14 +449,19 @@ def atomic_write_csv(file_name, rows, template_base: str, label_base: str):
                     row_data[k] = format_ingredients(r.get(k))
                 else:
                     row_data[k] = r.get(k, "") or ""
-            output_file = output_stem + ".pdf"
-
-            if label_base:
-                row_data["output_file_name"] = (
-                    label_base.rstrip("\\/") + "\\" + output_file
+                    
+                output_file = make_output_pdf_name(
+                    site=row_data.get("site", ""),
+                    batch_id=row_data.get("batch_id", ""),
+                    template_name=raw_template,
                 )
-            else:
-                row_data["output_file_name"] = output_file
+
+                if label_base:
+                    row_data["output_file_name"] = (
+                        label_base.rstrip("\\/") + "\\" + output_file
+                    )
+                else:
+                    row_data["output_file_name"] = output_file
 
             w.writerow(row_data)
 
