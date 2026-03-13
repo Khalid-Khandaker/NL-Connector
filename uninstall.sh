@@ -17,10 +17,20 @@ SELECTOR_NAME="selector"
 SELECTOR_SERVICE="/etc/systemd/system/${SELECTOR_NAME}.service"
 SELECTOR_TIMER="/etc/systemd/system/${SELECTOR_NAME}.timer"
 
+CLEANUP_NAME="cleanup-retention"
+CLEANUP_SERVICE="/etc/systemd/system/${CLEANUP_NAME}.service"
+CLEANUP_TIMER="/etc/systemd/system/${CLEANUP_NAME}.timer"
+
 CONTROL_API_NAME="connector-control-api"
 CONTROL_API_SERVICE="/etc/systemd/system/${CONTROL_API_NAME}.service"
 
-RETENTION_CRON="/etc/cron.daily/nl-connector-retention"
+SELECTOR_DROPIN_DIR="/etc/systemd/system/${SELECTOR_NAME}.service.d"
+SELECTOR_TRIGGER_DROPIN="${SELECTOR_DROPIN_DIR}/trigger-connector.conf"
+
+CONNECTOR_TIMER_WANTS="/etc/systemd/system/timers.target.wants/${CONNECTOR_NAME}.timer"
+SELECTOR_TIMER_WANTS="/etc/systemd/system/timers.target.wants/${SELECTOR_NAME}.timer"
+CLEANUP_TIMER_WANTS="/etc/systemd/system/timers.target.wants/${CLEANUP_NAME}.timer"
+CONTROL_API_WANTS="/etc/systemd/system/multi-user.target.wants/${CONTROL_API_NAME}.service"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -35,33 +45,44 @@ stop_disable_units() {
 
   systemctl stop "${CONNECTOR_NAME}.timer" 2>/dev/null || true
   systemctl disable "${CONNECTOR_NAME}.timer" 2>/dev/null || true
-
   systemctl stop "${CONNECTOR_NAME}.service" 2>/dev/null || true
   systemctl disable "${CONNECTOR_NAME}.service" 2>/dev/null || true
 
   systemctl stop "${SELECTOR_NAME}.timer" 2>/dev/null || true
   systemctl disable "${SELECTOR_NAME}.timer" 2>/dev/null || true
-
   systemctl stop "${SELECTOR_NAME}.service" 2>/dev/null || true
   systemctl disable "${SELECTOR_NAME}.service" 2>/dev/null || true
+
+  systemctl stop "${CLEANUP_NAME}.timer" 2>/dev/null || true
+  systemctl disable "${CLEANUP_NAME}.timer" 2>/dev/null || true
+  systemctl stop "${CLEANUP_NAME}.service" 2>/dev/null || true
+  systemctl disable "${CLEANUP_NAME}.service" 2>/dev/null || true
 
   systemctl stop "${CONTROL_API_NAME}.service" 2>/dev/null || true
   systemctl disable "${CONTROL_API_NAME}.service" 2>/dev/null || true
 }
 
+remove_selector_dropin() {
+  echo "Removing selector trigger drop-in if present..."
+  rm -f "$SELECTOR_TRIGGER_DROPIN"
+  rmdir "$SELECTOR_DROPIN_DIR" 2>/dev/null || true
+}
+
 remove_systemd_units() {
-  echo "Removing systemd unit files..."
+  echo "Removing systemd unit files and symlinks..."
+
   rm -f "$CONNECTOR_SERVICE" "$CONNECTOR_TIMER"
   rm -f "$SELECTOR_SERVICE" "$SELECTOR_TIMER"
+  rm -f "$CLEANUP_SERVICE" "$CLEANUP_TIMER"
   rm -f "$CONTROL_API_SERVICE"
+
+  rm -f "$CONNECTOR_TIMER_WANTS"
+  rm -f "$SELECTOR_TIMER_WANTS"
+  rm -f "$CLEANUP_TIMER_WANTS"
+  rm -f "$CONTROL_API_WANTS"
 
   systemctl daemon-reload
   systemctl reset-failed 2>/dev/null || true
-}
-
-remove_cron() {
-  echo "Removing retention cron..."
-  rm -f "$RETENTION_CRON"
 }
 
 remove_windows_test_file_if_mounted() {
@@ -82,7 +103,7 @@ remove_fstab_entry() {
   echo "Removing fstab entry for ${MOUNT_POINT}..."
   if [ -f /etc/fstab ]; then
     cp /etc/fstab /etc/fstab.bak.nlconnector.$(date +%Y%m%d%H%M%S)
-    grep -vE "[[:space:]]${MOUNT_POINT}[[:space:]]+cifs[[:space:]]" /etc/fstab > /etc/fstab.tmp
+    grep -vE "^[[:space:]]*//[^[:space:]]+[[:space:]]+${MOUNT_POINT}[[:space:]]+cifs([[:space:]]|$)" /etc/fstab > /etc/fstab.tmp
     mv /etc/fstab.tmp /etc/fstab
   fi
 }
@@ -121,8 +142,9 @@ final_message() {
   echo "Removed:"
   echo "  - /opt/nl-connector"
   echo "  - /var/log/nl-connector"
-  echo "  - systemd units for connector, selector, and control API"
-  echo "  - retention cron file"
+  echo "  - systemd units for connector, selector, cleanup retention, and control API"
+  echo "  - selector trigger drop-in"
+  echo "  - enabled timer/service symlinks"
   echo "  - SMB mount entry for $MOUNT_POINT"
   echo "  - mount folders if they became empty"
   echo "  - nlconnector user (default behavior)"
@@ -135,6 +157,7 @@ final_message() {
   echo "Recommended checks:"
   echo "  systemctl status ${CONNECTOR_NAME}.timer || true"
   echo "  systemctl status ${SELECTOR_NAME}.timer || true"
+  echo "  systemctl status ${CLEANUP_NAME}.timer || true"
   echo "  systemctl status ${CONTROL_API_NAME}.service || true"
   echo "  mount | grep nicelabel || true"
   echo "  grep nicelabel /etc/fstab || true"
@@ -143,10 +166,10 @@ final_message() {
 main() {
   need_root
   stop_disable_units
+  remove_selector_dropin
   remove_windows_test_file_if_mounted
   unmount_share
   remove_fstab_entry
-  remove_cron
   remove_systemd_units
   remove_app_files
   remove_logs

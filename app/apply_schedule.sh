@@ -102,8 +102,9 @@ write_selector_timer() {
 Description=Run Selector Service
 
 [Timer]
-${lines}Persistent=true
-RandomizedDelaySec=30
+${lines}
+Persistent=true
+RandomizedDelaySec=30s
 Unit=selector.service
 
 [Install]
@@ -119,8 +120,9 @@ write_cleanup_timer() {
 Description=Run NiceLabel Cleanup Retention Daily
 
 [Timer]
-${lines}Persistent=true
-RandomizedDelaySec=30
+${lines}
+Persistent=true
+RandomizedDelaySec=30s
 Unit=cleanup-retention.service
 
 [Install]
@@ -154,8 +156,9 @@ write_connector_timer_schedule() {
 Description=Run NiceLabel Connector
 
 [Timer]
-${lines}Persistent=true
-RandomizedDelaySec=30
+${lines}
+Persistent=true
+RandomizedDelaySec=30s
 Unit=nl-connector.service
 
 [Install]

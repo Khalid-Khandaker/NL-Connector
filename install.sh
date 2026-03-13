@@ -162,32 +162,43 @@ setup_venv() {
   if [ -f "$APP_DIR/requirements.txt" ]; then
     sudo -u nlconnector "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
   else
-    sudo -u nlconnector "$VENV/bin/pip" install supabase python-dotenv pyodbc flask
+    sudo -u nlconnector "$VENV/bin/pip" install supabase python-dotenv pyodbc flask requests
   fi
 }
 
 setup_mount() {
   echo "Setting up SMB mount..."
-  mkdir -p "$MOUNT_POINT"
 
   local USER_UID USER_GID
   USER_UID="$(id -u nlconnector)"
   USER_GID="$(id -g nlconnector)"
 
-  local FSTAB_LINE="//${WINDOWS_IP}/${SHARE_NAME}  ${MOUNT_POINT}  cifs  credentials=${CFG_DIR}/smb-credentials,uid=${USER_UID},gid=${USER_GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix  0  0"
+  local FSTAB_LINE="//${WINDOWS_IP}/${SHARE_NAME} ${MOUNT_POINT} cifs credentials=${CFG_DIR}/smb-credentials,uid=${USER_UID},gid=${USER_GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix 0 0"
 
+  echo "Cleaning old mount state if present..."
 
-  if grep -q "${MOUNT_POINT}  cifs" /etc/fstab; then
-    echo "fstab: entry already exists for ${MOUNT_POINT}"
-  else
-    echo "Adding fstab entry..."
-    echo "$FSTAB_LINE" >> /etc/fstab
+  if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    echo "Unmounting existing mount at $MOUNT_POINT ..."
+    umount -f "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null || true
   fi
+
+  mkdir -p "$(dirname "$MOUNT_POINT")"
+  mkdir -p "$MOUNT_POINT"
+
+  echo "Refreshing fstab entry for $MOUNT_POINT ..."
+  if [ -f /etc/fstab ]; then
+    cp /etc/fstab /etc/fstab.bak.nlconnector.$(date +%Y%m%d%H%M%S)
+    grep -vE "^[[:space:]]*//[^[:space:]]+[[:space:]]+${MOUNT_POINT}[[:space:]]+cifs([[:space:]]|$)" /etc/fstab > /etc/fstab.tmp || true
+    mv /etc/fstab.tmp /etc/fstab
+  fi
+
+  echo "Adding new fstab entry..."
+  echo "$FSTAB_LINE" >> /etc/fstab
 
   systemctl daemon-reload || true
 
-  umount -f "$MOUNT_POINT" 2>/dev/null || true
-  mount -a
+  echo "Mounting $MOUNT_POINT ..."
+  mount "$MOUNT_POINT"
 
   if command -v mountpoint >/dev/null 2>&1; then
     mountpoint -q "$MOUNT_POINT" || die "Mount failed for $MOUNT_POINT (check share + creds)."
@@ -207,13 +218,20 @@ install_systemd_units() {
   install -m 644 ./systemd/cleanup-retention.timer "$CLEANUP_TIMER"
   install -m 644 ./systemd/connector-control-api.service "$CONTROL_API_SERVICE"
 
+  echo "Normalizing unit files to Unix line endings..."
+  sed -i 's/\r$//' \
+    "$CONNECTOR_SERVICE" \
+    "$CONNECTOR_TIMER" \
+    "$SELECTOR_SERVICE" \
+    "$SELECTOR_TIMER" \
+    "$CLEANUP_SERVICE" \
+    "$CLEANUP_TIMER" \
+    "$CONTROL_API_SERVICE"
+
   echo "Removing old cron retention job if present..."
   rm -f /etc/cron.daily/nl-connector-retention
 
   systemctl daemon-reload
-  systemctl enable --now "${CONNECTOR_NAME}.timer"
-  systemctl enable --now "${SELECTOR_NAME}.timer"
-  systemctl enable --now "${CLEANUP_NAME}.timer"
 }
 
 final_checks() {
