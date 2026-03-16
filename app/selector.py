@@ -189,11 +189,9 @@ def join_ingredients_text(recipe_data: dict) -> str:
     if ingredients is None:
         return ""
 
-    # New format from updated SP
     if isinstance(ingredients, str):
         return ingredients.strip()
 
-    # Backward-compatible with old list format
     if isinstance(ingredients, list):
         if not ingredients:
             return ""

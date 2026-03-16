@@ -40,7 +40,6 @@ require_file() {
 
 trim() {
   local s="$1"
-  # remove leading/trailing whitespace
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"

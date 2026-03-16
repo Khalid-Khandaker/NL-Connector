@@ -45,24 +45,6 @@ def release_global_lock():
     except FileNotFoundError:
         pass
 
-# def _clean_single_ingredient(text: str) -> str:
-#     if not text:
-#         return ""
-#     text = text.strip()
-#     text = re.sub(r"^\d+\)\s*", "", text)
-#     if " - " in text:
-#         text = text.split(" - ", 1)[0]
-#     text = re.sub(r"\[.*?\]", "", text)
-#     text = re.sub(r"\(.*?\)", "", text)
-#     if "-" in text:
-#         parts = text.split("-")
-#         text = parts[0]
-#     text = re.sub(r"\b\d+%\b", "", text)
-#     text = re.sub(r"\s+", " ", text).strip()
-
-#     return text
-
-
 def _split_top_level(text: str):
     """
     Split by comma/semicolon only when not inside parentheses.
@@ -158,10 +140,8 @@ def _prettify_base_name(base: str) -> str:
 
     s = _strip_html(base).upper().strip()
 
-    # remove common leading numbering like "1) "
     s = re.sub(r"^\d+\)\s*", "", s)
 
-    # targeted cleanup for your current CalcMenu patterns
     replacements = [
         (r"^PDT DOUCE ROUGE.*$", "Patate douce rouge"),
         (r"^AVOCAT DEMI.*$", "Avocat"),
@@ -198,11 +178,8 @@ def _prettify_base_name(base: str) -> str:
         if re.match(pattern, s):
             return value
 
-    # generic fallback:
-    # remove trailing supplier/package chunks after first hyphen
     s = re.split(r"\s*-\s*", s, maxsplit=1)[0]
 
-    # remove some noisy pack/unit tails still left
     s = re.sub(r"\b\d+(?:[.,]\d+)?\s*(KG|G|GR|L|ML|U)\b", "", s)
     s = re.sub(r"\b\d+[Xx]\d+(?:[.,]\d+)?\b", "", s)
     s = re.sub(r"\bCAL\s*\d+/\d+\b", "", s)
@@ -225,7 +202,6 @@ def _clean_single_ingredient(text: str) -> str:
     if not text:
         return ""
 
-    # Special case: broken allergen rows like row 4 / 5
     if "product (" in text.lower():
         return _clean_allergen_blob(text)
 
@@ -270,7 +246,6 @@ def format_ingredients(ingredients):
 
     raw = str(ingredients).strip()
 
-    # handle broken "allergen blob" rows directly
     if "product (" in raw.lower():
         return _clean_allergen_blob(raw)
 
@@ -389,14 +364,11 @@ def make_output_pdf_name(site, batch_id, template_name):
 
     template_part = str(template_name or "").strip()
 
-    # keep only file name, remove folders
     template_part = os.path.basename(template_part.replace("\\", "/"))
 
-    # remove extension
     if template_part.lower().endswith(".nlbl"):
         template_part = template_part[:-5]
 
-    # make safe for file name
     template_part = _safe_name(template_part, "template", 80)
 
     return f"{site_part}_{date_part}_{template_part}.pdf"
@@ -663,7 +635,6 @@ def main():
             log("INFO", "EMPTY_QUEUE", "", "", "No READY rows found")
             return 0
 
-        # log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}")
         log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}", run_id=run_id)
 
         batches = {}

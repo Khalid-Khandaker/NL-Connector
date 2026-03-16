@@ -88,8 +88,6 @@ install_deps() {
   apt-get update -y
   apt-get install -y python3 python3-venv python3-pip cifs-utils unixodbc curl ca-certificates gnupg lsb-release
 
-  # Microsoft ODBC Driver 18
-  # Works for Ubuntu 20.04/22.04/24.04 by using VERSION_ID from /etc/os-release.
   echo "Installing Microsoft ODBC Driver 18 for SQL Server..."
   . /etc/os-release
   UBUNTU_VER="${VERSION_ID}"
@@ -103,8 +101,6 @@ EOF
   apt-get update -y
   ACCEPT_EULA=Y apt-get install -y msodbcsql18
 
-  # optional
-  # ACCEPT_EULA=Y apt-get install -y mssql-tools18
 }
 
 create_dirs() {
