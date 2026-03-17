@@ -3,8 +3,12 @@ set -euo pipefail
 
 REMOVE_USER="${REMOVE_USER:-1}"
 
-MOUNT_POINT="/mnt/nicelabel/in"
-MOUNT_PARENT="/mnt/nicelabel"
+CFG="/opt/nl-connector/config/.env"
+DEFAULT_MOUNT="/mnt/nicelabel/in"
+SUDOERS_UPDATE_SHARE="/etc/sudoers.d/nlconnector-update-share"
+
+MOUNT_POINT="$DEFAULT_MOUNT"
+MOUNT_PARENT="$(dirname "$MOUNT_POINT")"
 
 BASE="/opt/nl-connector"
 LOG_DIR="/var/log/nl-connector"
@@ -38,6 +42,20 @@ need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     die "Run as root: sudo ./uninstall.sh"
   fi
+}
+
+load_mount_config() {
+  if [ -f "$CFG" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$CFG"
+    set +a
+    MOUNT_POINT="${MOUNT_POINT:-$DEFAULT_MOUNT}"
+  else
+    MOUNT_POINT="$DEFAULT_MOUNT"
+  fi
+
+  MOUNT_PARENT="$(dirname "$MOUNT_POINT")"
 }
 
 stop_disable_units() {
@@ -95,7 +113,7 @@ remove_windows_test_file_if_mounted() {
 unmount_share() {
   echo "Unmounting SMB share..."
   if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
-    umount -f "$MOUNT_POINT" 2>/dev/null || true
+    umount -f "$MOUNT_POINT" 2>/dev/null || umount -l "$MOUNT_POINT" 2>/dev/null || true
   fi
 }
 
@@ -103,9 +121,14 @@ remove_fstab_entry() {
   echo "Removing fstab entry for ${MOUNT_POINT}..."
   if [ -f /etc/fstab ]; then
     cp /etc/fstab /etc/fstab.bak.nlconnector.$(date +%Y%m%d%H%M%S)
-    grep -vE "^[[:space:]]*//[^[:space:]]+[[:space:]]+${MOUNT_POINT}[[:space:]]+cifs([[:space:]]|$)" /etc/fstab > /etc/fstab.tmp
+    grep -vE "^[[:space:]]*//[^[:space:]]+[[:space:]]+${MOUNT_POINT}[[:space:]]+cifs([[:space:]]|$)" /etc/fstab > /etc/fstab.tmp || true
     mv /etc/fstab.tmp /etc/fstab
   fi
+}
+
+remove_sudoers_rule() {
+  echo "Removing sudoers rule for update_share if present..."
+  rm -f "$SUDOERS_UPDATE_SHARE"
 }
 
 remove_app_files() {
@@ -146,6 +169,7 @@ final_message() {
   echo "  - selector trigger drop-in"
   echo "  - enabled timer/service symlinks"
   echo "  - SMB mount entry for $MOUNT_POINT"
+  echo "  - update_share sudoers rule (if present)"
   echo "  - mount folders if they became empty"
   echo "  - nlconnector user (default behavior)"
   echo
@@ -165,11 +189,13 @@ final_message() {
 
 main() {
   need_root
+  load_mount_config
   stop_disable_units
   remove_selector_dropin
   remove_windows_test_file_if_mounted
   unmount_share
   remove_fstab_entry
+  remove_sudoers_rule
   remove_systemd_units
   remove_app_files
   remove_logs

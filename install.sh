@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+WINDOWS_HOST="${WINDOWS_HOST:-}"
 WINDOWS_IP="${WINDOWS_IP:-}"
-SHARE_NAME="${SHARE_NAME:-NiceLabelIn}"
-
-MOUNT_POINT="/mnt/nicelabel/in"
+SHARE_NAME="${SHARE_NAME:-}"
+MOUNT_POINT="${MOUNT_POINT:-}"
 
 BASE="/opt/nl-connector"
 APP_DIR="$BASE/app"
@@ -27,6 +27,8 @@ CLEANUP_TIMER="/etc/systemd/system/${CLEANUP_NAME}.timer"
 
 CONTROL_API_NAME="connector-control-api"
 CONTROL_API_SERVICE="/etc/systemd/system/${CONTROL_API_NAME}.service"
+
+
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -51,6 +53,7 @@ check_required_files() {
   [ -f "./app/control_api.py" ] || die "Missing ./app/control_api.py"
   [ -f "./systemd/connector-control-api.service" ] || die "Missing ./systemd/connector-control-api.service"
   [ -f "./app/apply_schedule.sh" ] || die "Missing ./app/apply_schedule.sh"
+  [ -f "./app/update_share.sh" ] || die "Missing ./app/update_share.sh"
 }
 
 preflight_checks() {
@@ -59,7 +62,9 @@ preflight_checks() {
   command -v systemctl >/dev/null 2>&1 || die "systemd not available (systemctl missing)"
   command -v python3 >/dev/null 2>&1 || die "python3 not installed"
 
-  [ -n "$WINDOWS_IP" ] || die "WINDOWS_IP not set. Example: sudo WINDOWS_IP=192.168.254.103 ./install.sh"
+  [ -n "$WINDOWS_HOST" ] || die "WINDOWS_HOST not set. Example: sudo WINDOWS_HOST=192.168.254.103 ./install.sh"
+  [ -n "$SHARE_NAME" ] || die "SHARE_NAME empty"
+  [ -n "$MOUNT_POINT" ] || die "MOUNT_POINT empty"
   [ -n "$SHARE_NAME" ] || die "SHARE_NAME empty (default is NiceLabelIn)"
 
   mkdir -p /opt/.nlconnector_preflight_test 2>/dev/null || die "Cannot write to /opt"
@@ -88,6 +93,8 @@ install_deps() {
   apt-get update -y
   apt-get install -y python3 python3-venv python3-pip cifs-utils unixodbc curl ca-certificates gnupg lsb-release
 
+  # Microsoft ODBC Driver 18
+  # Works for Ubuntu 20.04/22.04/24.04 by using VERSION_ID from /etc/os-release.
   echo "Installing Microsoft ODBC Driver 18 for SQL Server..."
   . /etc/os-release
   UBUNTU_VER="${VERSION_ID}"
@@ -101,6 +108,8 @@ EOF
   apt-get update -y
   ACCEPT_EULA=Y apt-get install -y msodbcsql18
 
+  # optional
+  # ACCEPT_EULA=Y apt-get install -y mssql-tools18
 }
 
 create_dirs() {
@@ -131,6 +140,9 @@ install_app_files() {
 
   install -m 755 ./app/apply_schedule.sh "$APP_DIR/apply_schedule.sh"
   chown nlconnector:nlconnector "$APP_DIR/apply_schedule.sh" || true
+
+  install -m 755 ./app/update_share.sh "$APP_DIR/update_share.sh"
+  chown nlconnector:nlconnector "$APP_DIR/update_share.sh" || true
 
   if [ -f "./app/requirements.txt" ]; then
     install -m 644 ./app/requirements.txt "$APP_DIR/requirements.txt"
@@ -169,7 +181,7 @@ setup_mount() {
   USER_UID="$(id -u nlconnector)"
   USER_GID="$(id -g nlconnector)"
 
-  local FSTAB_LINE="//${WINDOWS_IP}/${SHARE_NAME} ${MOUNT_POINT} cifs credentials=${CFG_DIR}/smb-credentials,uid=${USER_UID},gid=${USER_GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix 0 0"
+  local FSTAB_LINE="//${WINDOWS_HOST}/${SHARE_NAME} ${MOUNT_POINT} cifs credentials=${CFG_DIR}/smb-credentials,uid=${USER_UID},gid=${USER_GID},iocharset=utf8,vers=3.0,file_mode=0664,dir_mode=0775,nounix 0 0"
 
   echo "Cleaning old mount state if present..."
 
@@ -249,9 +261,26 @@ final_checks() {
   echo "  sudo systemctl start ${CLEANUP_NAME}.service"
 }
 
+load_mount_config() {
+  [ -f "./config/config.env" ] || die "Missing ./config/config.env"
+
+  local cfg_host=""
+  local cfg_share=""
+  local cfg_mount=""
+
+  cfg_host="$(grep -E '^WINDOWS_HOST=' ./config/config.env | head -n1 | cut -d= -f2- || true)"
+  cfg_share="$(grep -E '^SHARE_NAME=' ./config/config.env | head -n1 | cut -d= -f2- || true)"
+  cfg_mount="$(grep -E '^MOUNT_POINT=' ./config/config.env | head -n1 | cut -d= -f2- || true)"
+
+  WINDOWS_HOST="${WINDOWS_HOST:-${WINDOWS_IP:-$cfg_host}}"
+  SHARE_NAME="${SHARE_NAME:-$cfg_share}"
+  MOUNT_POINT="${MOUNT_POINT:-${cfg_mount:-/mnt/nicelabel/in}}"
+}
+
 main() {
   need_root
   check_required_files
+  load_mount_config
   preflight_checks
   install_deps
   create_user_if_needed
