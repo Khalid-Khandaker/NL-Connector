@@ -40,6 +40,7 @@ require_file() {
 
 trim() {
   local s="$1"
+  # remove leading/trailing whitespace
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
@@ -68,8 +69,8 @@ normalize_interval_for_systemd() {
 build_oncalendar_lines() {
   local raw="$1"
   local unit_name="$2"
-  local result=""
   local seen=""
+  local out=()
 
   IFS=',' read -ra parts <<< "$raw"
   [ "${#parts[@]}" -gt 0 ] || die "$unit_name times are empty"
@@ -86,47 +87,45 @@ build_oncalendar_lines() {
       *) seen="${seen:+$seen,}$t" ;;
     esac
 
-    result="${result}OnCalendar=*-*-* ${t}:00"$'\n'
+    out+=("OnCalendar=*-*-* ${t}:00")
   done
 
-  [ -n "$result" ] || die "No valid times found for $unit_name"
-  printf '%s' "$result"
+  [ "${#out[@]}" -gt 0 ] || die "No valid times found for $unit_name"
+  printf '%s\n' "${out[@]}"
 }
 
 write_selector_timer() {
   local lines="$1"
-
-  cat > "$SELECTOR_TIMER" <<EOF
-[Unit]
-Description=Run Selector Service
-
-[Timer]
-${lines}
-Persistent=true
-RandomizedDelaySec=30s
-Unit=selector.service
-
-[Install]
-WantedBy=timers.target
-EOF
+  {
+    printf '%s\n' '[Unit]'
+    printf '%s\n' 'Description=Run Selector Service'
+    printf '\n'
+    printf '%s\n' '[Timer]'
+    printf '%s\n' "$lines"
+    printf '%s\n' 'Persistent=true'
+    printf '%s\n' 'RandomizedDelaySec=30s'
+    printf '%s\n' 'Unit=selector.service'
+    printf '\n'
+    printf '%s\n' '[Install]'
+    printf '%s\n' 'WantedBy=timers.target'
+  } > "$SELECTOR_TIMER"
 }
 
 write_cleanup_timer() {
   local lines="$1"
-
-  cat > "$CLEANUP_TIMER" <<EOF
-[Unit]
-Description=Run NiceLabel Cleanup Retention Daily
-
-[Timer]
-${lines}
-Persistent=true
-RandomizedDelaySec=30s
-Unit=cleanup-retention.service
-
-[Install]
-WantedBy=timers.target
-EOF
+  {
+    printf '%s\n' '[Unit]'
+    printf '%s\n' 'Description=Run NiceLabel Cleanup Retention Daily'
+    printf '\n'
+    printf '%s\n' '[Timer]'
+    printf '%s\n' "$lines"
+    printf '%s\n' 'Persistent=true'
+    printf '%s\n' 'RandomizedDelaySec=30s'
+    printf '%s\n' 'Unit=cleanup-retention.service'
+    printf '\n'
+    printf '%s\n' '[Install]'
+    printf '%s\n' 'WantedBy=timers.target'
+  } > "$CLEANUP_TIMER"
 }
 
 write_connector_timer_interval() {
@@ -149,20 +148,19 @@ EOF
 
 write_connector_timer_schedule() {
   local lines="$1"
-
-  cat > "$CONNECTOR_TIMER" <<EOF
-[Unit]
-Description=Run NiceLabel Connector
-
-[Timer]
-${lines}
-Persistent=true
-RandomizedDelaySec=30s
-Unit=nl-connector.service
-
-[Install]
-WantedBy=timers.target
-EOF
+  {
+    printf '%s\n' '[Unit]'
+    printf '%s\n' 'Description=Run NiceLabel Connector'
+    printf '\n'
+    printf '%s\n' '[Timer]'
+    printf '%s\n' "$lines"
+    printf '%s\n' 'Persistent=true'
+    printf '%s\n' 'RandomizedDelaySec=30s'
+    printf '%s\n' 'Unit=nl-connector.service'
+    printf '\n'
+    printf '%s\n' '[Install]'
+    printf '%s\n' 'WantedBy=timers.target'
+  } > "$CONNECTOR_TIMER"
 }
 
 main() {
@@ -222,6 +220,11 @@ main() {
   fi
 
   systemctl daemon-reload
+
+  systemd-analyze verify "$SELECTOR_TIMER"
+  systemd-analyze verify "$CONNECTOR_TIMER"
+  systemd-analyze verify "$CLEANUP_TIMER"
+
   systemctl enable --now selector.timer
   systemctl enable --now nl-connector.timer
   systemctl enable --now cleanup-retention.timer

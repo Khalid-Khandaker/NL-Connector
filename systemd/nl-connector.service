@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=nlconnector
+WorkingDirectory=/opt/nl-connector/app
 ExecStart=/opt/nl-connector/app/.venv/bin/python /opt/nl-connector/app/connector.py
 
 StandardOutput=journal

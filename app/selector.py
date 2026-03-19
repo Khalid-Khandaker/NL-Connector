@@ -1,4 +1,6 @@
 import os
+import pwd
+import sys
 import re
 import json
 from datetime import datetime, timezone
@@ -7,6 +9,20 @@ import requests
 from dotenv import dotenv_values
 from supabase import create_client
 import time
+
+
+REQUIRED_USER = "nlconnector"
+
+def require_service_user() -> None:
+    current_user = pwd.getpwuid(os.geteuid()).pw_name
+    if current_user != REQUIRED_USER:
+        print(
+            f"ERROR: This program must run as '{REQUIRED_USER}', not '{current_user}'.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+require_service_user()
 
 ENV_PATH = "/opt/nl-connector/config/.env"
 SERVICE_NAME = "selector"
@@ -189,9 +205,11 @@ def join_ingredients_text(recipe_data: dict) -> str:
     if ingredients is None:
         return ""
 
+    # New format from updated SP
     if isinstance(ingredients, str):
         return ingredients.strip()
 
+    # Backward-compatible with old list format
     if isinstance(ingredients, list):
         if not ingredients:
             return ""

@@ -7,6 +7,13 @@ CFG="/opt/nl-connector/config/.env"
 DEFAULT_MOUNT="/mnt/nicelabel/in"
 SUDOERS_UPDATE_SHARE="/etc/sudoers.d/nlconnector-update-share"
 
+WRAPPER_DIR="/usr/local/bin"
+WRAP_CONNECTOR="${WRAPPER_DIR}/nl-connector-run"
+WRAP_SELECTOR="${WRAPPER_DIR}/nl-selector-run"
+WRAP_CONTROL_API="${WRAPPER_DIR}/nl-control-api-run"
+WRAP_APPLY_SCHEDULE="${WRAPPER_DIR}/nl-connector-apply-schedule"
+WRAP_UPDATE_SHARE="${WRAPPER_DIR}/nl-connector-update-share"
+
 MOUNT_POINT="$DEFAULT_MOUNT"
 MOUNT_PARENT="$(dirname "$MOUNT_POINT")"
 
@@ -27,6 +34,7 @@ CLEANUP_TIMER="/etc/systemd/system/${CLEANUP_NAME}.timer"
 
 CONTROL_API_NAME="connector-control-api"
 CONTROL_API_SERVICE="/etc/systemd/system/${CONTROL_API_NAME}.service"
+CONTROL_API_WANTS="/etc/systemd/system/multi-user.target.wants/${CONTROL_API_NAME}.service"
 
 SELECTOR_DROPIN_DIR="/etc/systemd/system/${SELECTOR_NAME}.service.d"
 SELECTOR_TRIGGER_DROPIN="${SELECTOR_DROPIN_DIR}/trigger-connector.conf"
@@ -34,7 +42,6 @@ SELECTOR_TRIGGER_DROPIN="${SELECTOR_DROPIN_DIR}/trigger-connector.conf"
 CONNECTOR_TIMER_WANTS="/etc/systemd/system/timers.target.wants/${CONNECTOR_NAME}.timer"
 SELECTOR_TIMER_WANTS="/etc/systemd/system/timers.target.wants/${SELECTOR_NAME}.timer"
 CLEANUP_TIMER_WANTS="/etc/systemd/system/timers.target.wants/${CLEANUP_NAME}.timer"
-CONTROL_API_WANTS="/etc/systemd/system/multi-user.target.wants/${CONTROL_API_NAME}.service"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -92,6 +99,7 @@ remove_systemd_units() {
   rm -f "$CONNECTOR_SERVICE" "$CONNECTOR_TIMER"
   rm -f "$SELECTOR_SERVICE" "$SELECTOR_TIMER"
   rm -f "$CLEANUP_SERVICE" "$CLEANUP_TIMER"
+
   rm -f "$CONTROL_API_SERVICE"
 
   rm -f "$CONNECTOR_TIMER_WANTS"
@@ -131,6 +139,16 @@ remove_sudoers_rule() {
   rm -f "$SUDOERS_UPDATE_SHARE"
 }
 
+remove_wrappers() {
+  echo "Removing wrapper commands..."
+  rm -f \
+    "$WRAP_CONNECTOR" \
+    "$WRAP_SELECTOR" \
+    "$WRAP_CONTROL_API" \
+    "$WRAP_APPLY_SCHEDULE" \
+    "$WRAP_UPDATE_SHARE"
+}
+
 remove_app_files() {
   echo "Removing application directories..."
   rm -rf "$BASE"
@@ -165,7 +183,9 @@ final_message() {
   echo "Removed:"
   echo "  - /opt/nl-connector"
   echo "  - /var/log/nl-connector"
-  echo "  - systemd units for connector, selector, cleanup retention, and control API"
+  echo "  - systemd units for connector, selector, cleanup retention"
+  echo "  - legacy control API service if it existed"
+  echo "  - wrapper commands in /usr/local/bin"
   echo "  - selector trigger drop-in"
   echo "  - enabled timer/service symlinks"
   echo "  - SMB mount entry for $MOUNT_POINT"
@@ -182,7 +202,6 @@ final_message() {
   echo "  systemctl status ${CONNECTOR_NAME}.timer || true"
   echo "  systemctl status ${SELECTOR_NAME}.timer || true"
   echo "  systemctl status ${CLEANUP_NAME}.timer || true"
-  echo "  systemctl status ${CONTROL_API_NAME}.service || true"
   echo "  mount | grep nicelabel || true"
   echo "  grep nicelabel /etc/fstab || true"
 }
@@ -196,6 +215,7 @@ main() {
   unmount_share
   remove_fstab_entry
   remove_sudoers_rule
+  remove_wrappers
   remove_systemd_units
   remove_app_files
   remove_logs
@@ -205,3 +225,4 @@ main() {
 }
 
 main
+

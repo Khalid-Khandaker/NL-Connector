@@ -5,6 +5,7 @@ Description=Run NiceLabel Selector Daily at 6AM
 OnCalendar=*-*-* 06:00:00
 Persistent=true
 RandomizedDelaySec=30
+Unit=selector.service
 
 [Install]
 WantedBy=timers.target

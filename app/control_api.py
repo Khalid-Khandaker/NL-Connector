@@ -1,4 +1,6 @@
 import os
+import pwd
+import sys
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -7,6 +9,20 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from supabase import create_client
 
+
+REQUIRED_USER = "nlconnector"
+
+def require_service_user() -> None:
+    current_user = pwd.getpwuid(os.geteuid()).pw_name
+    if current_user != REQUIRED_USER:
+        print(
+            f"ERROR: This program must run as '{REQUIRED_USER}', not '{current_user}'.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+require_service_user()
+
 load_dotenv("/opt/nl-connector/config/.env")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
@@ -14,7 +30,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "")
 
 API_KEY = os.getenv("CONTROL_API_KEY", "")
-HOST = os.getenv("CONTROL_API_HOST", "192.168.254.106")
+HOST = os.getenv("CONTROL_API_HOST", "0.0.0.0")
 PORT = int(os.getenv("CONTROL_API_PORT", "8088"))
 
 VENV_PY = "/opt/nl-connector/app/.venv/bin/python"
@@ -34,7 +50,7 @@ MOUNT_PATH = "/mnt/nicelabel/in"
 STAGING_PATH = "/opt/nl-connector/staging"
 LOG_DIR = "/var/log/nl-connector"
 
-RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "30"))
+RETENTION_DAYS = int(os.getenv("CLEANUP_RETENTION_DAYS", "30"))
 ERROR_DIR = "/opt/nl-connector/error"
 ARCHIVE_DIR = "/opt/nl-connector/archive"
 CLEANUP_LOG = "/var/log/nl-connector/cleanup.log"
@@ -455,7 +471,7 @@ def config_share():
         return jsonify({"ok": False, "error": "share_name is required"}), 400
 
     cmd = [
-        "/usr/bin/sudo",
+        "/usr/bin/sudo", "-n",
         UPDATE_SHARE_SCRIPT,
         "--host", windows_host,
         "--share", share_name,

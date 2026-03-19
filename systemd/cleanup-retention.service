@@ -7,3 +7,6 @@ Type=oneshot
 User=nlconnector
 WorkingDirectory=/opt/nl-connector/app
 ExecStart=/opt/nl-connector/app/cleanup_retention.sh
+
+StandardOutput=journal
+StandardError=journal

@@ -3,12 +3,15 @@ set -euo pipefail
 
 CFG="/opt/nl-connector/config/.env"
 SMB_CREDS="/opt/nl-connector/config/smb-credentials"
-DEFAULT_MOUNT="/mnt/nicelabel/in"
 SERVICE_USER="nlconnector"
 
 NEW_HOST=""
 NEW_SHARE=""
 NEW_MOUNT=""
+
+FINAL_HOST=""
+FINAL_SHARE=""
+FINAL_MOUNT=""
 
 die() {
   echo "ERROR: $*" >&2
@@ -21,17 +24,23 @@ info() {
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    die "Run as root: sudo /opt/nl-connector/app/update_share.sh --host <windows_host> --share <share_name>"
+    die "Run as root: sudo /opt/nl-connector/app/update_share.sh [--host <windows_host>] [--share <share_name>] [--mount <mount_point>]"
   fi
 }
 
 usage() {
   cat <<EOF
 Usage:
-  sudo /opt/nl-connector/app/update_share.sh --host <windows_host> --share <share_name> [--mount <mount_point>]
+  sudo /opt/nl-connector/app/update_share.sh [--host <windows_host>] [--share <share_name>] [--mount <mount_point>]
+
+Behavior:
+  - CLI values override config values in $CFG
+  - If a value is not passed in CLI, the script uses the value from $CFG
+  - If still missing, the script stops with an error
 
 Examples:
-  sudo /opt/nl-connector/app/update_share.sh --host 192.168.254.104 --share NiceLabelIn
+  sudo /opt/nl-connector/app/update_share.sh
+  sudo /opt/nl-connector/app/update_share.sh --host 192.168.254.104
   sudo /opt/nl-connector/app/update_share.sh --host DESKTOP-PRINT --share NiceLabelHotIn --mount /mnt/nicelabel/in
 EOF
 }
@@ -81,30 +90,31 @@ load_cfg() {
   . "$CFG"
   set +a
 
-  WINDOWS_HOST="${WINDOWS_HOST:-}"
-  SHARE_NAME="${SHARE_NAME:-}"
-  MOUNT_POINT="${MOUNT_POINT:-$DEFAULT_MOUNT}"
+  WINDOWS_HOST="$(trim "${WINDOWS_HOST:-}")"
+  SHARE_NAME="$(trim "${SHARE_NAME:-}")"
+  MOUNT_POINT="$(trim "${MOUNT_POINT:-}")"
 }
 
 validate_inputs() {
   NEW_HOST="$(trim "$NEW_HOST")"
   NEW_SHARE="$(trim "$NEW_SHARE")"
-  NEW_MOUNT="$(trim "${NEW_MOUNT:-}")"
+  NEW_MOUNT="$(trim "$NEW_MOUNT")"
 
-  [ -n "$NEW_HOST" ] || die "--host is required"
-  [ -n "$NEW_SHARE" ] || die "--share is required"
+  FINAL_HOST="${NEW_HOST:-$WINDOWS_HOST}"
+  FINAL_SHARE="${NEW_SHARE:-$SHARE_NAME}"
+  FINAL_MOUNT="${NEW_MOUNT:-$MOUNT_POINT}"
 
-  if [ -z "$NEW_MOUNT" ]; then
-    NEW_MOUNT="${MOUNT_POINT:-$DEFAULT_MOUNT}"
-  fi
+  [ -n "$FINAL_HOST" ] || die "WINDOWS_HOST is required. Pass --host or define WINDOWS_HOST in $CFG"
+  [ -n "$FINAL_SHARE" ] || die "SHARE_NAME is required. Pass --share or define SHARE_NAME in $CFG"
+  [ -n "$FINAL_MOUNT" ] || die "MOUNT_POINT is required. Pass --mount or define MOUNT_POINT in $CFG"
 
-  case "$NEW_SHARE" in
+  case "$FINAL_SHARE" in
     *" "*)
-      die "Share name must not contain spaces unless you are sure your SMB share is created exactly that way."
+      die "Share name must not contain spaces unless the SMB share was created with spaces intentionally."
       ;;
   esac
 
-  case "$NEW_MOUNT" in
+  case "$FINAL_MOUNT" in
     /*) ;;
     *)
       die "Mount point must be an absolute path, example: /mnt/nicelabel/in"
@@ -180,11 +190,11 @@ write_test() {
 show_summary() {
   echo
   echo "Share updated successfully."
-  echo "  WINDOWS_HOST=$NEW_HOST"
-  echo "  SHARE_NAME=$NEW_SHARE"
-  echo "  MOUNT_POINT=$NEW_MOUNT"
+  echo "  WINDOWS_HOST=$FINAL_HOST"
+  echo "  SHARE_NAME=$FINAL_SHARE"
+  echo "  MOUNT_POINT=$FINAL_MOUNT"
   echo
-  mount | grep "on ${NEW_MOUNT} " || true
+  mount | grep "on ${FINAL_MOUNT} " || true
 }
 
 main() {
@@ -196,20 +206,20 @@ main() {
   info "Current config:"
   echo "  WINDOWS_HOST=${WINDOWS_HOST:-<empty>}"
   echo "  SHARE_NAME=${SHARE_NAME:-<empty>}"
-  echo "  MOUNT_POINT=${MOUNT_POINT:-$DEFAULT_MOUNT}"
+  echo "  MOUNT_POINT=${MOUNT_POINT:-<empty>}"
   echo
 
-  unmount_if_needed "${MOUNT_POINT:-$DEFAULT_MOUNT}"
-  remove_existing_fstab_entries "${MOUNT_POINT:-$DEFAULT_MOUNT}"
+  unmount_if_needed "${MOUNT_POINT:-$FINAL_MOUNT}"
+  remove_existing_fstab_entries "${MOUNT_POINT:-$FINAL_MOUNT}"
 
-  update_env_key "WINDOWS_HOST" "$NEW_HOST"
-  update_env_key "SHARE_NAME" "$NEW_SHARE"
-  update_env_key "MOUNT_POINT" "$NEW_MOUNT"
+  update_env_key "WINDOWS_HOST" "$FINAL_HOST"
+  update_env_key "SHARE_NAME" "$FINAL_SHARE"
+  update_env_key "MOUNT_POINT" "$FINAL_MOUNT"
 
-  write_fstab_entry "$NEW_HOST" "$NEW_SHARE" "$NEW_MOUNT"
+  write_fstab_entry "$FINAL_HOST" "$FINAL_SHARE" "$FINAL_MOUNT"
   systemctl daemon-reload || true
-  mount_share "$NEW_MOUNT"
-  write_test "$NEW_MOUNT"
+  mount_share "$FINAL_MOUNT"
+  write_test "$FINAL_MOUNT"
   show_summary
 }
 

@@ -1,4 +1,5 @@
 import csv, json, os, shutil, sys, time
+import pwd
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from supabase import create_client
@@ -6,13 +7,25 @@ from supabase import create_client
 import re
 from html import unescape
 
+REQUIRED_USER = "nlconnector"
+
+def require_service_user() -> None:
+    current_user = pwd.getpwuid(os.geteuid()).pw_name
+    if current_user != REQUIRED_USER:
+        print(
+            f"ERROR: This program must run as '{REQUIRED_USER}', not '{current_user}'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+require_service_user()
+
 LOCK_PATH = "/var/lock/nl-connector.lock"
 BASE = "/opt/nl-connector"
 STAGING = f"{BASE}/staging"
 ARCHIVE = f"{BASE}/archive"
 ERROR = f"{BASE}/error"
 LOG_PATH = "/var/log/nl-connector/connector.log"
-DEST = "/mnt/nicelabel/in"
 SERVICE_NAME = "connector"
 RETRIES = 3
 RETRY_DELAY_SEC = 10
@@ -140,8 +153,10 @@ def _prettify_base_name(base: str) -> str:
 
     s = _strip_html(base).upper().strip()
 
+    # remove common leading numbering like "1) "
     s = re.sub(r"^\d+\)\s*", "", s)
 
+    # targeted cleanup for your current CalcMenu patterns
     replacements = [
         (r"^PDT DOUCE ROUGE.*$", "Patate douce rouge"),
         (r"^AVOCAT DEMI.*$", "Avocat"),
@@ -178,8 +193,11 @@ def _prettify_base_name(base: str) -> str:
         if re.match(pattern, s):
             return value
 
+    # generic fallback:
+    # remove trailing supplier/package chunks after first hyphen
     s = re.split(r"\s*-\s*", s, maxsplit=1)[0]
 
+    # remove some noisy pack/unit tails still left
     s = re.sub(r"\b\d+(?:[.,]\d+)?\s*(KG|G|GR|L|ML|U)\b", "", s)
     s = re.sub(r"\b\d+[Xx]\d+(?:[.,]\d+)?\b", "", s)
     s = re.sub(r"\bCAL\s*\d+/\d+\b", "", s)
@@ -202,6 +220,7 @@ def _clean_single_ingredient(text: str) -> str:
     if not text:
         return ""
 
+    # Special case: broken allergen rows like row 4 / 5
     if "product (" in text.lower():
         return _clean_allergen_blob(text)
 
@@ -246,6 +265,7 @@ def format_ingredients(ingredients):
 
     raw = str(ingredients).strip()
 
+    # handle broken "allergen blob" rows directly
     if "product (" in raw.lower():
         return _clean_allergen_blob(raw)
 
@@ -364,11 +384,14 @@ def make_output_pdf_name(site, batch_id, template_name):
 
     template_part = str(template_name or "").strip()
 
+    # keep only file name, remove folders
     template_part = os.path.basename(template_part.replace("\\", "/"))
 
+    # remove extension
     if template_part.lower().endswith(".nlbl"):
         template_part = template_part[:-5]
 
+    # make safe for file name
     template_part = _safe_name(template_part, "template", 80)
 
     return f"{site_part}_{date_part}_{template_part}.pdf"
@@ -617,6 +640,12 @@ def main():
 
     try:
         load_dotenv("/opt/nl-connector/config/.env")
+        
+        dest = os.getenv("MOUNT_POINT", "").strip()
+        if not dest:
+            log("ERROR", "VALIDATION_FAILED", "", "", "MOUNT_POINT is not set in /opt/nl-connector/config/.env")
+            return 1
+        
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         table = os.getenv("SUPABASE_TABLE")
@@ -635,6 +664,7 @@ def main():
             log("INFO", "EMPTY_QUEUE", "", "", "No READY rows found")
             return 0
 
+        # log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}")
         log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}", run_id=run_id)
 
         batches = {}
@@ -698,7 +728,7 @@ def main():
 
             csv_path = atomic_write_csv(file_name, rows, template_base, label_base)
 
-            ok, info = copy_with_retry(csv_path, DEST, file_name)
+            ok, info = copy_with_retry(csv_path, dest, file_name)
             if not ok:
                 log("ERROR", "COPY_FAILED", batch_id, file_name, info)
                 return 2
