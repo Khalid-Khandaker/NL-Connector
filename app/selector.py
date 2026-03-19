@@ -88,12 +88,6 @@ def detect_trigger() -> str:
 
 
 def clean_product_name(name: str) -> str:
-    """
-    Remove bracketed and parenthesized suffixes.
-    Examples:
-      "mélange champignons [OPUS1542]" -> "mélange champignons"
-      "Chicken Adobo (Test)" -> "Chicken Adobo"
-    """
     if not name:
         return name
 
@@ -178,7 +172,6 @@ def fetch_recipe_label_data(
 
 
 def pick(item: dict, *keys, default=None):
-    """Return first non-None value among keys."""
     for k in keys:
         if k in item and item[k] is not None:
             return item[k]
@@ -194,11 +187,6 @@ def join_allergens_short(recipe_data: dict) -> str:
 
 
 def join_ingredients_text(recipe_data: dict) -> str:
-    """
-    Supports both:
-    1) New SP format: content.ingredients is a plain text string
-    2) Old SP format: content.ingredients is a list of ingredient objects
-    """
     content = recipe_data.get("content") or {}
     ingredients = content.get("ingredients")
 
