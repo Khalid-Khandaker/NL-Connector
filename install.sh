@@ -226,7 +226,6 @@ install_config_files() {
   install -m 640 ./config/config.env "$CFG_DIR/.env"
   install -m 640 ./config/smb-credentials "$CFG_DIR/smb-credentials"
 
-  # Runtime code must read these files but must not be able to modify them.
   chown root:"$SERVICE_GROUP" "$CFG_DIR/.env" "$CFG_DIR/smb-credentials"
   chmod 640 "$CFG_DIR/.env" "$CFG_DIR/smb-credentials"
 }
@@ -396,11 +395,9 @@ setup_mount() {
 }
 
 install_systemd_units() {
-  # Legacy
   systemctl stop connector-control-api.service 2>/dev/null || true
   systemctl disable connector-control-api.service 2>/dev/null || true
   rm -f /etc/systemd/system/multi-user.target.wants/connector-control-api.service
-  # ---
 
   echo "Installing systemd unit files..."
   install -m 644 ./systemd/nl-connector.service "$CONNECTOR_SERVICE"
