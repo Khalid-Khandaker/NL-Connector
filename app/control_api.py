@@ -72,7 +72,6 @@ def _tail_jsonl(path: str, max_lines: int = 50):
     if not os.path.exists(path):
         return {"exists": False, "path": path, "tail": [], "last_event": None}
 
-    # simple tail (reads whole file if small; ok for now)
     try:
         with open(path, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()[-max_lines:]
@@ -87,7 +86,6 @@ def _tail_jsonl(path: str, max_lines: int = 50):
             tail.append(obj)
             last_event = obj
         except Exception:
-            # keep raw if not JSON
             tail.append({"raw": ln})
 
     return {"exists": True, "path": path, "tail": tail, "last_event": last_event}
@@ -162,7 +160,6 @@ def _dir_size_bytes(path: str):
         return None
 
 def _oldest_dir_days(path: str):
-    # oldest subfolder age in days (based on mtime)
     try:
         out = subprocess.check_output(
             ["bash", "-lc", f"find '{path}' -mindepth 1 -maxdepth 1 -type d -printf '%T@\\n' 2>/dev/null | sort -n | head -1"],
@@ -205,14 +202,10 @@ def queue():
 
     sb = _sb()
 
-    # NOTE: Supabase python client doesn't provide cheap COUNT in this snippet,
-    # but keeping it simple and consistent with your current approach.
-    # If table grows big, we’ll switch to a Postgres RPC count function.
     def count_status(st: str) -> int:
         r = sb.table(SUPABASE_TABLE).select("id").eq("status", st).limit(10000).execute()
         return len(r.data or [])
 
-    # oldest READY created_at (for run grouping visibility)
     oldest_ready = None
     try:
         r0 = (
@@ -311,7 +304,6 @@ def trigger_selector():#
     if not _auth_ok():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
 
-    # Optional: skip if selector lock exists (if you implement it in selector.py)
     if os.path.exists(SELECTOR_LOCK):
         return jsonify({"ok": True, "started": False, "reason": "selector already running"}), 200
 
@@ -323,8 +315,7 @@ def trigger_selector():#
 def trigger_connector():
     if not _auth_ok():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    # Connector already has lock; we can avoid starting if lock exists
+        
     if os.path.exists(CONNECTOR_LOCK):
         return jsonify({"ok": True, "started": False, "reason": "connector already running"}), 200
 
@@ -335,18 +326,16 @@ def trigger_connector():
 def logs():
     if not _auth_ok():
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-
-    # Optional filters
-    service_filter = request.args.get("service")  # "selector" | "connector" (optional)
-    level_filter = request.args.get("level")      # "INFO" | "ERROR" (optional)
+        
+    service_filter = request.args.get("service")
+    level_filter = request.args.get("level") 
     limit = int(request.args.get("limit", "100"))
 
-    path = CONNECTOR_LOG  # single combined log file
+    path = CONNECTOR_LOG
 
     if not os.path.exists(path):
         return jsonify({"ok": False, "error": "log file not found", "path": path}), 404
 
-    # Overfetch so filtering still returns up to `limit`
     overfetch = max(limit * 10, 200)
 
     try:
@@ -356,7 +345,7 @@ def logs():
         return jsonify({"ok": False, "error": str(e)}), 500
 
     events = []
-    for ln in reversed(lines):  # newest-first
+    for ln in reversed(lines):
         if len(events) >= limit:
             break
         try:
@@ -390,7 +379,6 @@ def runtime():
     connector_log = _tail_jsonl(CONNECTOR_LOG, max_lines=200)
     selector_log = _tail_jsonl(SELECTOR_LOG, max_lines=200)
 
-    # find last validation-related event in connector log tail
     last_validation = None
     if connector_log.get("tail"):
         for e in reversed(connector_log["tail"]):
@@ -428,7 +416,6 @@ def cleanup_status():
             "folders_older_than_retention": _count_older_than(path, RETENTION_DAYS) if exists else None
         }
 
-    # tail cleanup log (latest 30 lines)
     log_tail = []
     if os.path.exists(CLEANUP_LOG):
         try:
