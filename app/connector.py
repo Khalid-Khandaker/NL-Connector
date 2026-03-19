@@ -59,11 +59,6 @@ def release_global_lock():
         pass
 
 def _split_top_level(text: str):
-    """
-    Split by comma/semicolon only when not inside parentheses.
-    Example:
-    'A, B (x, y), C' -> ['A', 'B (x, y)', 'C']
-    """
     if not text:
         return []
 
@@ -113,11 +108,6 @@ def _normalize_spaces(text: str) -> str:
 
 
 def _clean_allergen_blob(text: str) -> str:
-    """
-    For rows like:
-    EGS CP Product (Egg, Milk, Céréales..., Lait, ...)
-    return only the readable content inside parentheses.
-    """
     text = _strip_html(text)
     text = _normalize_spaces(text)
 
@@ -144,10 +134,6 @@ def _clean_allergen_blob(text: str) -> str:
 
 
 def _prettify_base_name(base: str) -> str:
-    """
-    Convert ugly catalog names into readable ingredient names
-    while keeping French.
-    """
     if not base:
         return ""
 
@@ -227,14 +213,6 @@ def _clean_single_ingredient(text: str) -> str:
 
 
 def format_ingredients(ingredients):
-    """
-    Accepts:
-    - CalcMenu JSON list
-    - Raw string (comma/semicolon separated, including nested parentheses)
-
-    Returns:
-    Clean comma-separated string
-    """
     if not ingredients:
         return ""
 
@@ -288,11 +266,6 @@ def log(level, event, batch_id, file_name, message, run_id=""):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 def clean_product_name(name: str) -> str:
-    """
-    Clean product_name coming from CalcMenu.
-    Example:
-    '"EGS CP Cookies And Cream Mousse' -> 'Cookies And Cream Mousse'
-    """
     if not name:
         return ""
 
@@ -358,15 +331,6 @@ def make_filename(site, batch_id):
     return f"{site_part}_{date_part}.csv"
 
 def make_output_pdf_name(site, batch_id, template_name):
-    """
-    Example:
-    site=1
-    batch_id=20260309-0010-1-004
-    template_name=RestaurantLabel_1.nlbl
-
-    Returns:
-    1_20260309_RestaurantLabel_1.pdf
-    """
     date_part = str(batch_id)[:8]
     if not date_part.isdigit():
         date_part = datetime.now().strftime("%Y%m%d")
@@ -387,10 +351,6 @@ def make_output_pdf_name(site, batch_id, template_name):
     return f"{site_part}_{date_part}_{template_part}.pdf"
 
 def sort_rows_for_nicelabel(rows):
-    """
-    Group rows by template so NiceLabel processes same-template labels
-    consecutively and can append them into the same PDF.
-    """
     def sort_key(r):
         template_name = str(r.get("template_name") or "").casefold()
         product_name = str(r.get("product_name") or "").casefold()
@@ -505,9 +465,6 @@ def write_validation_error_artifacts(site, run_id, batch_id, file_name, rows, re
 
 
 def mark_batch_error_rows(sb, table, batch_id, errors):
-    """
-    errors = [(row_id, reason), (row_id, reason), ...]
-    """
 
     try:
         sb.table(table).update({"status": "ERROR"}).eq("batch_id", batch_id).execute()
@@ -531,11 +488,6 @@ def mark_batch_error_rows(sb, table, batch_id, errors):
                 log("ERROR", "UNEXPECTED_ERROR", batch_id, "", f"Failed to mark row ERROR: {e}")
 
 def fetch_ready_batch_ids_for_oldest_created_at(sb, table: str, limit_batches: int = 100):
-    """
-    1) Find the oldest created_at among READY rows.
-    2) Return unique batch_ids where status=READY AND created_at==that oldest value.
-    This prevents mixing multiple selector runs.
-    """
     resp0 = (
         sb.table(table)
         .select("created_at")
@@ -577,10 +529,6 @@ def fetch_ready_batch_ids_for_oldest_created_at(sb, table: str, limit_batches: i
 
 
 def claim_batch(sb, table: str, batch_id: str, run_id: str) -> bool:
-    """
-    Lock a batch for this run by changing READY -> VALIDATING.
-    Returns True only if THIS run successfully claimed at least one row.
-    """
     try:
         resp = (
             sb.table(table)
