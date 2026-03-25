@@ -31,6 +31,7 @@ API1_FILE_NAME = "selector.py"
 LOCK_PATH = "/var/lock/nl-selector.lock"
 ALLOWED_CODELISTE = {132072, 151637, 184573}
 
+
 def acquire_lock() -> bool:
     os.makedirs("/var/lock", exist_ok=True)
     try:
@@ -88,6 +89,12 @@ def detect_trigger() -> str:
 
 
 def clean_product_name(name: str) -> str:
+    """
+    Remove bracketed and parenthesized suffixes.
+    Examples:
+      "mélange champignons [OPUS1542]" -> "mélange champignons"
+      "Chicken Adobo (Test)" -> "Chicken Adobo"
+    """
     if not name:
         return name
 
@@ -170,14 +177,6 @@ def fetch_recipe_label_data(
 
     return data
 
-
-def pick(item: dict, *keys, default=None):
-    for k in keys:
-        if k in item and item[k] is not None:
-            return item[k]
-    return default
-
-
 def join_allergens_short(recipe_data: dict) -> str:
     content = recipe_data.get("content") or {}
     allergens = content.get("allergens") or []
@@ -187,6 +186,11 @@ def join_allergens_short(recipe_data: dict) -> str:
 
 
 def join_ingredients_text(recipe_data: dict) -> str:
+    """
+    Supports both:
+    1) New SP format: content.ingredients is a plain text string
+    2) Old SP format: content.ingredients is a list of ingredient objects
+    """
     content = recipe_data.get("content") or {}
     ingredients = content.get("ingredients")
 
@@ -332,14 +336,14 @@ def main():
             candidates: List[Dict[str, Any]] = []
 
             for item in recipes_to_print:
-                code_liste = pick(item, "CodeListe", "code")
+                code_liste = item.get("CodeListe")
 
                 if code_liste not in ALLOWED_CODELISTE:
                     continue
 
-                code_trans = pick(item, "CodeTrans", default=7)
-                code_nutrient_set = pick(item, "CodeNutrientSet", default=0)
-                template_name = pick(item, "TemplateName", "template", default="RestaurantLabel_1")
+                code_trans = item.get("CodeTrans", 7)
+                code_nutrient_set = item.get("CodeNutrientSet", 0)
+                template_name = item.get("TemplateName", "RestaurantLabel_1")
 
                 if code_liste is None:
                     raise RuntimeError(f"Top10 row missing CodeListe/code. Row={item}")
@@ -371,6 +375,12 @@ def main():
 
                     ingredients_text = join_ingredients_text(recipe_data)
 
+                    price = str(content.get("Price") or "").strip()
+                    currency = str(content.get("Currency") or "").strip()
+                    date_prepared = str(content.get("DatePrepared") or "").strip()
+                    use_by = str(content.get("UseBy") or "").strip()
+                    barcode = str(content.get("Barcode") or "").strip()
+
                     site = extract_site(recipe_data) or "1"
                     language = language_override if language_override else str(code_trans)
 
@@ -385,6 +395,11 @@ def main():
                             "product_name": product_name,
                             "allergens_short": allergens_short,
                             "ingredients": ingredients_text,
+                            "price": price,
+                            "currency": currency,
+                            "date_prepared": date_prepared,
+                            "use_by": use_by,
+                            "barcode": barcode,
                             "status": status_to_set,
                             "qty": qty,
                             "error_reason": None,
@@ -509,6 +524,7 @@ def main():
             raise
     finally:
         release_lock()
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

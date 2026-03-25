@@ -39,7 +39,14 @@ REQUIRED = [
     ("allergens_short", 180, "text"),
     ("qty", None, "int_1_999"),
 ]
-OPTIONAL_CSV_FIELDS = ["ingredients"]
+OPTIONAL_CSV_FIELDS = [
+    "ingredients",
+    "price",
+    "currency",
+    "date_prepared",
+    "use_by",
+    "barcode",
+]
 CSV_HEADERS = [k for k, _, _ in REQUIRED] + OPTIONAL_CSV_FIELDS + ["output_file_name"]
 
 def acquire_global_lock() -> bool:
@@ -59,6 +66,11 @@ def release_global_lock():
         pass
 
 def _split_top_level(text: str):
+    """
+    Split by comma/semicolon only when not inside parentheses.
+    Example:
+    'A, B (x, y), C' -> ['A', 'B (x, y)', 'C']
+    """
     if not text:
         return []
 
@@ -108,6 +120,11 @@ def _normalize_spaces(text: str) -> str:
 
 
 def _clean_allergen_blob(text: str) -> str:
+    """
+    For rows like:
+    EGS CP Product (Egg, Milk, Céréales..., Lait, ...)
+    return only the readable content inside parentheses.
+    """
     text = _strip_html(text)
     text = _normalize_spaces(text)
 
@@ -134,13 +151,19 @@ def _clean_allergen_blob(text: str) -> str:
 
 
 def _prettify_base_name(base: str) -> str:
+    """
+    Convert ugly catalog names into readable ingredient names
+    while keeping French.
+    """
     if not base:
         return ""
 
     s = _strip_html(base).upper().strip()
 
+    # remove common leading numbering like "1) "
     s = re.sub(r"^\d+\)\s*", "", s)
 
+    # targeted cleanup for your current CalcMenu patterns
     replacements = [
         (r"^PDT DOUCE ROUGE.*$", "Patate douce rouge"),
         (r"^AVOCAT DEMI.*$", "Avocat"),
@@ -177,8 +200,11 @@ def _prettify_base_name(base: str) -> str:
         if re.match(pattern, s):
             return value
 
+    # generic fallback:
+    # remove trailing supplier/package chunks after first hyphen
     s = re.split(r"\s*-\s*", s, maxsplit=1)[0]
 
+    # remove some noisy pack/unit tails still left
     s = re.sub(r"\b\d+(?:[.,]\d+)?\s*(KG|G|GR|L|ML|U)\b", "", s)
     s = re.sub(r"\b\d+[Xx]\d+(?:[.,]\d+)?\b", "", s)
     s = re.sub(r"\bCAL\s*\d+/\d+\b", "", s)
@@ -200,7 +226,8 @@ def _clean_single_ingredient(text: str) -> str:
 
     if not text:
         return ""
-        
+
+    # Special case: broken allergen rows like row 4 / 5
     if "product (" in text.lower():
         return _clean_allergen_blob(text)
 
@@ -213,6 +240,14 @@ def _clean_single_ingredient(text: str) -> str:
 
 
 def format_ingredients(ingredients):
+    """
+    Accepts:
+    - CalcMenu JSON list
+    - Raw string (comma/semicolon separated, including nested parentheses)
+
+    Returns:
+    Clean comma-separated string
+    """
     if not ingredients:
         return ""
 
@@ -237,6 +272,7 @@ def format_ingredients(ingredients):
 
     raw = str(ingredients).strip()
 
+    # handle broken "allergen blob" rows directly
     if "product (" in raw.lower():
         return _clean_allergen_blob(raw)
 
@@ -266,6 +302,11 @@ def log(level, event, batch_id, file_name, message, run_id=""):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 def clean_product_name(name: str) -> str:
+    """
+    Clean product_name coming from CalcMenu.
+    Example:
+    '"EGS CP Cookies And Cream Mousse' -> 'Cookies And Cream Mousse'
+    """
     if not name:
         return ""
 
@@ -331,6 +372,15 @@ def make_filename(site, batch_id):
     return f"{site_part}_{date_part}.csv"
 
 def make_output_pdf_name(site, batch_id, template_name):
+    """
+    Example:
+    site=1
+    batch_id=20260309-0010-1-004
+    template_name=RestaurantLabel_1.nlbl
+
+    Returns:
+    1_20260309_RestaurantLabel_1.pdf
+    """
     date_part = str(batch_id)[:8]
     if not date_part.isdigit():
         date_part = datetime.now().strftime("%Y%m%d")
@@ -341,16 +391,23 @@ def make_output_pdf_name(site, batch_id, template_name):
 
     template_part = str(template_name or "").strip()
 
+    # keep only file name, remove folders
     template_part = os.path.basename(template_part.replace("\\", "/"))
-    
+
+    # remove extension
     if template_part.lower().endswith(".nlbl"):
         template_part = template_part[:-5]
 
+    # make safe for file name
     template_part = _safe_name(template_part, "template", 80)
 
     return f"{site_part}_{date_part}_{template_part}.pdf"
 
 def sort_rows_for_nicelabel(rows):
+    """
+    Group rows by template so NiceLabel processes same-template labels
+    consecutively and can append them into the same PDF.
+    """
     def sort_key(r):
         template_name = str(r.get("template_name") or "").casefold()
         product_name = str(r.get("product_name") or "").casefold()
@@ -363,12 +420,10 @@ def atomic_write_csv(file_name, rows, template_base: str, label_base: str):
     os.makedirs(STAGING, exist_ok=True)
     tmp_path = os.path.join(STAGING, file_name + ".tmp")
     csv_path = os.path.join(STAGING, file_name)
-    
+
     rows = sort_rows_for_nicelabel(rows)
 
-    output_stem = os.path.splitext(file_name)[0]
-
-    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+    with open(tmp_path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_HEADERS)
         w.writeheader()
 
@@ -388,25 +443,25 @@ def atomic_write_csv(file_name, rows, template_base: str, label_base: str):
                 )
             else:
                 row_data["template_name"] = raw_template
-                
+
             for k in OPTIONAL_CSV_FIELDS:
                 if k == "ingredients":
                     row_data[k] = format_ingredients(r.get(k))
                 else:
                     row_data[k] = r.get(k, "") or ""
-                    
-                output_file = make_output_pdf_name(
-                    site=row_data.get("site", ""),
-                    batch_id=row_data.get("batch_id", ""),
-                    template_name=raw_template,
-                )
 
-                if label_base:
-                    row_data["output_file_name"] = (
-                        label_base.rstrip("\\/") + "\\" + output_file
-                    )
-                else:
-                    row_data["output_file_name"] = output_file
+            output_file = make_output_pdf_name(
+                site=row_data.get("site", ""),
+                batch_id=row_data.get("batch_id", ""),
+                template_name=raw_template,
+            )
+
+            if label_base:
+                row_data["output_file_name"] = (
+                    label_base.rstrip("\\/") + "\\" + output_file
+                )
+            else:
+                row_data["output_file_name"] = output_file
 
             w.writerow(row_data)
 
@@ -465,6 +520,9 @@ def write_validation_error_artifacts(site, run_id, batch_id, file_name, rows, re
 
 
 def mark_batch_error_rows(sb, table, batch_id, errors):
+    """
+    errors = [(row_id, reason), (row_id, reason), ...]
+    """
 
     try:
         sb.table(table).update({"status": "ERROR"}).eq("batch_id", batch_id).execute()
@@ -488,6 +546,11 @@ def mark_batch_error_rows(sb, table, batch_id, errors):
                 log("ERROR", "UNEXPECTED_ERROR", batch_id, "", f"Failed to mark row ERROR: {e}")
 
 def fetch_ready_batch_ids_for_oldest_created_at(sb, table: str, limit_batches: int = 100):
+    """
+    1) Find the oldest created_at among READY rows.
+    2) Return unique batch_ids where status=READY AND created_at==that oldest value.
+    This prevents mixing multiple selector runs.
+    """
     resp0 = (
         sb.table(table)
         .select("created_at")
@@ -529,6 +592,10 @@ def fetch_ready_batch_ids_for_oldest_created_at(sb, table: str, limit_batches: i
 
 
 def claim_batch(sb, table: str, batch_id: str, run_id: str) -> bool:
+    """
+    Lock a batch for this run by changing READY -> VALIDATING.
+    Returns True only if THIS run successfully claimed at least one row.
+    """
     try:
         resp = (
             sb.table(table)
@@ -602,6 +669,7 @@ def main():
             log("INFO", "EMPTY_QUEUE", "", "", "No READY rows found")
             return 0
 
+        # log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}")
         log("INFO", "RUN_GROUP_SELECTED", "", "", f"created_at={run_created_at} batches={len(batch_ids)}", run_id=run_id)
 
         batches = {}
