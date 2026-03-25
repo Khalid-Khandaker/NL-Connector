@@ -82,35 +82,49 @@ This API layer makes the selector simpler and gives you one stable interface bet
 
 The selector is responsible for calling the CalcMenu API, transforming the response into queue rows, grouping rows into batches, and inserting those rows into Supabase.
 
-What it does at a high level:
+#### What it does at a high level:
 
 - loads environment variables from `/opt/nl-connector/config/.env`
 - calls the API endpoint for recipes ready to print
 - filters recipes using an allowed `CodeListe` list
 - fetches detailed label data for each allowed recipe
-- prepares queue rows with fields such as:
-  - `batch_id`
-  - `site`
-  - `template_name`
-  - `language`
-  - `product_name`
-  - `allergens_short`
-  - `ingredients`
-  - `qty`
-  - `status`
+- creates queue rows
 - inserts rows into Supabase
 - writes JSON log lines to the connector log file
 
+#### Data written to Supabase
+
+The selector writes the following fields into Supabase:
+
+| Field            | Description              |
+|------------------|--------------------------|
+| batch_id         | Batch identifier         |
+| site             | Site code                |
+| template_name    | NiceLabel template       |
+| language         | Language                 |
+| product_name     | Product name             |
+| allergens_short  | Allergen summary         |
+| ingredients      | Ingredients              |
+| qty              | Quantity                 |
+| price            | Product price            |
+| currency         | Currency                 |
+| date_prepared    | Date prepared            |
+| use_by           | Expiry / use-by date     |
+| barcode          | Barcode                  |
+| status           | Queue status             |
+
+Supabase acts as a live queue for the connector.
+
 The selector uses a lock file so two selector runs do not overlap.
 
-### 3) `connector.py` — validate and deliver service
+### 3) `connector.py` — CSV Generator and Delivery Service
 
 The connector is the second stage of the pipeline. It reads queued rows from Supabase and prepares the CSV that NiceLabel expects.
 
-What it does at a high level:
+#### What it does at a high level:
 
 - acquires a global lock so only one connector run is active
-- finds the oldest `READY` group in Supabase
+- finds the oldest `READY` batch in Supabase
 - claims that batch by changing status from `READY` to `VALIDATING`
 - validates each row
 - sorts rows for better NiceLabel behavior
@@ -121,7 +135,31 @@ What it does at a high level:
 - updates the Supabase rows to `SENT`
 - writes logs and validation artifacts when needed
 
-This service is the point where business-ready queue rows become actual NiceLabel input files.
+This service is where queue data becomes actual NiceLabel input files.
+
+#### Required Fields (Core Label Fields)
+
+| Column           | Description                     |
+|------------------|---------------------------------|
+| batch_id         | Batch identifier                |
+| site             | Site code                       |
+| template_name    | NiceLabel template path         |
+| language         | Language                        |
+| product_name     | Product name                    |
+| allergens_short  | Allergen summary                |
+| qty              | Number of labels                |
+
+#### Additional Supported Fields
+
+| Column           | Description                             |
+|------------------|-----------------------------------------|
+| ingredients      | Ingredient list                         |
+| price            | Product price                           |
+| currency         | Currency code (PHP, USD, etc.)          |
+| date_prepared    | Date prepared (YYYY-MM-DD)              |
+| use_by           | Use-by / expiry date (YYYY-MM-DD)       |
+| barcode          | Barcode value                           |
+| output_file_name | Output PDF file path                    |
 
 ### 4) `control_api.py` — operations and support API
 
